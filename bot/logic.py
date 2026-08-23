@@ -11,8 +11,6 @@ from typing import Any
 from bot import db
 from bot.config import settings
 
-logger = logging.getLogger(__name__)
-
 PROTEIN_RATIO = 2.0  # g por kg de peso corporal
 WEIGHT_CHANGE_THRESHOLD = 1.0  # kg de diferencia para recalcular targets
 
@@ -53,7 +51,8 @@ async def get_latest_weight() -> float | None:
     rows = await db.get_weight_range(start, end)
     if not rows:
         return None
-    return rows[-1]["weight_kg"]
+    weight = rows[-1]["weight_kg"]
+    return round(weight, 2) if weight is not None else None
 
 
 async def recalculate_targets_if_needed() -> bool:
@@ -69,7 +68,6 @@ async def recalculate_targets_if_needed() -> bool:
     if current_weight is None:
         return False
 
-    # Estimamos el peso con el que se calculó el target actual
     current_protein_target = targets.get("protein_target_g") or 0
     implied_weight = current_protein_target / PROTEIN_RATIO if current_protein_target else 0
 
@@ -107,10 +105,10 @@ async def get_today_summary() -> dict[str, Any]:
     prot_target = (targets or {}).get("protein_target_g") or (weight or 80) * PROTEIN_RATIO
 
     if nutrition:
-        cal_consumed = nutrition.get("calories") or 0
-        prot_consumed = nutrition.get("protein_g") or 0
-        carbs_consumed = nutrition.get("carbs_g") or 0
-        fat_consumed = nutrition.get("fat_g") or 0
+        cal_consumed = round(nutrition.get("calories") or 0, 1)
+        prot_consumed = round(nutrition.get("protein_g") or 0, 1)
+        carbs_consumed = round(nutrition.get("carbs_g") or 0, 1)
+        fat_consumed = round(nutrition.get("fat_g") or 0, 1)
         has_data = True
     else:
         cal_consumed = prot_consumed = carbs_consumed = fat_consumed = 0
@@ -121,10 +119,10 @@ async def get_today_summary() -> dict[str, Any]:
         "has_data": has_data,
         "calories_consumed": cal_consumed,
         "calories_target": cal_target,
-        "calories_remaining": cal_target - cal_consumed,
+        "calories_remaining": round(cal_target - cal_consumed, 1),
         "protein_consumed": prot_consumed,
         "protein_target": prot_target,
-        "protein_remaining": prot_target - prot_consumed,
+        "protein_remaining": round(prot_target - prot_consumed, 1),
         "carbs_consumed": carbs_consumed,
         "fat_consumed": fat_consumed,
         "is_complete": (nutrition or {}).get("is_complete", 0),
@@ -157,7 +155,6 @@ async def get_weekly_summary(days: int = 7) -> dict[str, Any]:
     workout_rows = await db.get_workouts_range(start, end)
     weight_rows = await db.get_weight_range(start, end)
 
-    # Adherencia proteína
     days_with_prot = [
         r for r in nutrition_rows
         if r.get("protein_g") is not None and r["protein_g"] >= prot_target
@@ -168,7 +165,6 @@ async def get_weekly_summary(days: int = 7) -> dict[str, Any]:
         else None
     )
 
-    # Adherencia calórica (días dentro del ±10% del objetivo)
     days_in_cal_range = [
         r for r in nutrition_rows
         if r.get("calories") is not None
@@ -180,16 +176,13 @@ async def get_weekly_summary(days: int = 7) -> dict[str, Any]:
         else None
     )
 
-    # Media de peso
     weights = [r["weight_kg"] for r in weight_rows if r.get("weight_kg") is not None]
     avg_weight = round(sum(weights) / len(weights), 2) if weights else None
 
-    # Peso inicial vs. final de la semana para tendencia
     weight_trend = None
     if len(weights) >= 2:
         weight_trend = round(weights[-1] - weights[0], 2)
 
-    # Entrenos
     workout_names = [r["name"] for r in workout_rows if r.get("name")]
     total_kcal_burned = sum(
         r["active_energy_kcal"] for r in workout_rows if r.get("active_energy_kcal")
@@ -257,7 +250,7 @@ async def build_ai_context(days: int = 7) -> dict[str, Any]:
         "weekly_summary": weekly,
         "nutrition_last_7_days": nutrition_rows,
         "workouts_last_7_days": [
-            {k: v for k, v in w.items() if k != "raw_json"}  # excluir json crudo del contexto IA
+            {k: v for k, v in w.items() if k != "raw_json"}
             for w in workout_rows
         ],
         "weight_last_7_days": weight_rows,

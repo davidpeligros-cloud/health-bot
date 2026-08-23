@@ -319,13 +319,6 @@ async def _handle_body_weight(payload: HealthPayload) -> None:
         return
     await db.upsert_body_weight(payload.date, b.weight_kg)
     logger.info("Peso guardado: %.1f kg para %s", b.weight_kg, payload.date)
-
-    from bot.logic import recalculate_targets_if_needed
-    recalculated = await recalculate_targets_if_needed()
-    if recalculated:
-        weight = b.weight_kg
-        new_prot = round(weight * 2.0, 1)
-        await _send_telegram(
-            f"⚖️ Peso actualizado: <b>{weight} kg</b>\n"
-            f"🥩 Objetivo de proteína recalculado: <b>{new_prot} g/día</b>"
-        )
+    
+    # Notificación limpia sin recálculo automático de proteína
+    await _send_telegram(f"⚖️ Peso registrado: <b>{b.weight_kg} kg</b>")

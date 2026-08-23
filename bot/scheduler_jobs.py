@@ -1,14 +1,15 @@
 """
 scheduler_jobs.py — Jobs programados con APScheduler.
-Resumen matutino, aviso nocturno y resumen semanal.
+Resumen matutino, aviso nocturno, resumen semanal y recordatorios dinámicos.
 """
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 from bot import db
 from bot.config import settings
@@ -16,6 +17,7 @@ from bot.config import settings
 logger = logging.getLogger(__name__)
 
 _bot_app = None  # Referencia inyectada desde main.py
+_global_scheduler = None  # Referencia al scheduler activo para recordatorios dinámicos
 
 
 def set_bot_app(app) -> None:
@@ -35,6 +37,33 @@ async def _send(text: str) -> None:
         )
     except Exception as exc:
         logger.error("Scheduler no pudo enviar mensaje: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job: Recordatorio personalizado dinámico
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def send_reminder_job(text: str) -> None:
+    """Envía un recordatorio único programado por el usuario."""
+    await _send(f"⏰ <b>¡Recordatorio!</b>\n\n{text}")
+    logger.info("Recordatorio dinámico enviado: %s", text)
+
+
+def schedule_custom_reminder(run_date: datetime, text: str) -> None:
+    """Añade un recordatorio único al scheduler activo."""
+    global _global_scheduler
+    if _global_scheduler:
+        _global_scheduler.add_job(
+            send_reminder_job,
+            trigger=DateTrigger(run_date=run_date),
+            args=[text],
+            id=f"reminder_{run_date.timestamp()}",
+            replace_existing=True,
+        )
+        logger.info("Recordatorio programado con éxito para: %s", run_date)
+    else:
+        logger.warning("No se pudo programar el recordatorio: scheduler no inicializado.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -62,7 +91,7 @@ async def job_morning_summary() -> None:
     )
 
     msg = (
-        f"☀️ <b>Buenos días!</b> Objetivo de hoy:\n"
+        f"☀️ <b>¡Buenos días!</b> Objetivo de hoy:\n"
         f"{weight_line}\n\n"
         f"🔥 Calorías objetivo: <b>{cal_target:.0f} kcal</b>\n"
         f"🥩 Proteína objetivo: <b>{prot_target:.0f} g</b>\n\n"
@@ -88,18 +117,16 @@ async def job_night_check() -> None:
     nutrition = await db.get_daily_nutrition(today)
 
     if nutrition is None:
-        # No llegaron datos hoy
         msg = (
             f"🌙 <b>Aviso nocturno</b>\n\n"
             f"⚠️ No se han recibido datos de nutrición de hoy ({today}).\n\n"
-            f"Si ya registraste tu comida en Yazio, abre Atajos y ejecuta manualmente "
+            f"Si ya registraste tu comida, abre Atajos y ejecuta manualmente "
             f"la automatización de envío, o espera a que se ejecute sola."
         )
         await _send(msg)
         await db.mark_reminder_sent(today, "night")
         logger.info("Aviso nocturno (sin datos) enviado para %s", today)
     else:
-        # Hay datos — enviar resumen nocturno con estado final
         from bot.logic import get_today_summary
         summary = await get_today_summary()
         cal_remaining = summary["calories_remaining"]
@@ -157,7 +184,6 @@ async def job_weekly_summary() -> None:
     )
     await _send(summary_text)
 
-    # Consejo semanal de Claude
     advice = await get_advice(context_days=7)
     await _send(f"🧠 <b>Análisis semanal:</b>\n\n{advice}")
 
@@ -171,7 +197,9 @@ async def job_weekly_summary() -> None:
 
 
 def create_scheduler() -> AsyncIOScheduler:
+    global _global_scheduler
     scheduler = AsyncIOScheduler(timezone="Europe/Madrid")
+    _global_scheduler = scheduler  # Guardamos la instancia globalmente
 
     morning_h, morning_m = settings.get_morning_hour_minute()
     night_h, night_m = settings.get_night_hour_minute()

@@ -1,15 +1,17 @@
 """
-telegram_handlers.py — Handlers async para todos los comandos del bot de Telegram.
+telegram_handlers.py — Handlers async para todos los comandos y mensajes de Telegram.
 """
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 from bot import db, logic
 from bot.ai_advice import get_advice
+from bot.scheduler_jobs import schedule_custom_reminder
 
 logger = logging.getLogger(__name__)
 
@@ -157,17 +159,10 @@ async def cmd_semana(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_objetivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Sin argumentos: muestra objetivos actuales.
-    Con argumentos: edita campos.
-    Uso: /objetivo cal 1700 prot 160 carbs 180 gras 55
-    """
     targets = await db.get_targets()
-
     args = context.args or []
 
     if not args:
-        # Mostrar objetivos
         if not targets:
             await update.message.reply_text("⚠️ No hay objetivos configurados.")
             return
@@ -186,7 +181,6 @@ async def cmd_objetivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_html(msg)
         return
 
-    # Parsear argumentos clave-valor
     allowed_keys = {
         "cal": "calorie_target",
         "prot": "protein_target_g",
@@ -248,7 +242,6 @@ async def cmd_entreno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if last.get("active_energy_kcal"):
         lines.append(f"🔥 Activas: {last['active_energy_kcal']:.0f} kcal")
 
-    # Comparación
     if last.get("name"):
         comparison = await logic.compare_workout(last["id"], last["name"])
         prev = comparison.get("previous")
@@ -256,9 +249,9 @@ async def cmd_entreno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if prev and diff:
             lines.append(f"\n📊 <b>Vs. sesión anterior ({prev['date']}):</b>")
             if diff.get("duration_min") is not None:
-                lines.append(f"  ⏱ Duración: {_fmt_diff(diff['duration_min'], ' min')}")
+                lines.append(f"   ⏱ Duración: {_fmt_diff(diff['duration_min'], ' min')}")
             if diff.get("active_energy_kcal") is not None:
-                lines.append(f"  🔥 Activas: {_fmt_diff(diff['active_energy_kcal'], ' kcal')}")
+                lines.append(f"   🔥 Activas: {_fmt_diff(diff['active_energy_kcal'], ' kcal')}")
         elif not prev:
             lines.append(f"\n📊 Primera sesión de <b>{last['name']}</b> registrada.")
 
@@ -271,7 +264,6 @@ async def cmd_entreno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_consejo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Maneja el comando /consejo permitiendo preguntas o usando el prompt por defecto."""
     user_prompt = (
         " ".join(context.args)
         if context.args
@@ -284,14 +276,73 @@ async def cmd_consejo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# /recuerdame (Nuevo comando para agendar avisos reales)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_recuerdame(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Uso: /recuerdame 10:00 Tomar la creatina y desayunar"""
+    args = context.args
+    if not args or len(args) < 2:
+        await update.message.reply_text("⚠️ Uso correcto: /recuerdame 10:00 Texto del recordatorio")
+        return
+
+    time_str = args[0]
+    message_text = " ".join(args[1:])
+
+    now = datetime.now()
+    try:
+        hour, minute = map(int, time_str.split(":"))
+    except ValueError:
+        await update.message.reply_text("⚠️ Formato de hora inválido. Usa HH:MM (ej. 10:00)")
+        return
+
+    target_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target_time < now:
+        target_time += timedelta(days=1)
+
+    schedule_custom_reminder(target_time, message_text)
+    await update.message.reply_text(f"✅ ¡Apuntado! Te recordaré: '{message_text}' a las {time_str}.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # /olvidar
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 async def cmd_olvidar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Borra el historial de la conversación con la IA."""
     await db.clear_chat_history()
     await update.message.reply_text("🧹 Memoria de la conversación borrada correctamente.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat libre con IA (Mensajes de texto sin comandos)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Permite hablar libremente con el bot sin necesidad de escribir /consejo."""
+    user_message = update.message.text
+    if not user_message:
+        return
+
+    wait_msg = await update.message.reply_text("🤔 Analizando tus datos y nuestra conversación… un momento.")
+    
+    try:
+        advice = await get_advice(user_prompt=user_message, context_days=7)
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=wait_msg.message_id,
+            text=f"🧠 <b>Consejo personalizado:</b>\n\n{advice}",
+            parse_mode="HTML",
+        )
+    except Exception as exc:
+        logger.error("Error en chat libre con IA: %s", exc)
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=wait_msg.message_id,
+            text="❌ Hubo un error procesando tu mensaje con la IA.",
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -300,12 +351,17 @@ async def cmd_olvidar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 def register_handlers(application: Application) -> None:
-    """Registra todos los command handlers en la aplicación del bot."""
+    """Registra todos los handlers en la aplicación del bot."""
     application.add_handler(CommandHandler("ping", cmd_ping))
     application.add_handler(CommandHandler("hoy", cmd_hoy))
     application.add_handler(CommandHandler("semana", cmd_semana))
     application.add_handler(CommandHandler("objetivo", cmd_objetivo))
     application.add_handler(CommandHandler("entreno", cmd_entreno))
     application.add_handler(CommandHandler("consejo", cmd_consejo))
+    application.add_handler(CommandHandler("recuerdame", cmd_recuerdame))
     application.add_handler(CommandHandler("olvidar", cmd_olvidar))
-    logger.info("Handlers de Telegram registrados.")
+    
+    # Captura cualquier mensaje de texto plano para hablar libremente
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_message))
+    
+    logger.info("Handlers de Telegram registrados (con chat libre y recordatorios).")

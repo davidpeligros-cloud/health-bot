@@ -5,27 +5,31 @@ Todas las funciones son async y acceden a la BD a través de db.py.
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any
 
 from bot import db
 from bot.config import settings
+
+logger = logging.getLogger(__name__)
 
 PROTEIN_RATIO = 2.0  # g por kg de peso corporal
 WEIGHT_CHANGE_THRESHOLD = 1.0  # kg de diferencia para recalcular targets
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Utilidades de fecha
+# Utilidades de fecha (Zona horaria Madrid)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def _today() -> str:
-    return date.today().isoformat()
+    return datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()
 
 
 def _n_days_ago(n: int) -> str:
-    return (date.today() - timedelta(days=n)).isoformat()
+    current_date = datetime.now(ZoneInfo("Europe/Madrid")).date()
+    return (current_date - timedelta(days=n)).isoformat()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

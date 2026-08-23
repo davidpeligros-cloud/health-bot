@@ -55,9 +55,15 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     summary = await logic.get_today_summary()
 
+    weight_line = (
+        f"\n⚖️ Peso: <b>{summary['latest_weight']} kg</b>"
+        if summary.get("latest_weight")
+        else ""
+    )
+
     if not summary["has_data"]:
         msg = (
-            f"📅 <b>Resumen de hoy</b> — {summary['date']}\n\n"
+            f"📅 <b>Resumen de hoy</b> — {summary['date']}{weight_line}\n\n"
             "⚠️ Aún no hay datos de nutrición para hoy.\n"
             "Los datos llegarán cuando Atajos ejecute la automatización."
         )
@@ -72,12 +78,6 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     cal_remaining = summary["calories_remaining"]
     prot_remaining = summary["protein_remaining"]
-
-    weight_line = (
-        f"\n⚖️ Peso: <b>{summary['latest_weight']} kg</b>"
-        if summary["latest_weight"]
-        else ""
-    )
 
     incomplete_notice = "\n⚠️ <i>Datos incompletos (faltan algunos macros)</i>" if not summary["is_complete"] else ""
 
@@ -276,7 +276,7 @@ async def cmd_consejo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# /recuerdame (Nuevo comando para agendar avisos reales)
+# /recuerdame
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -361,7 +361,6 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("recuerdame", cmd_recuerdame))
     application.add_handler(CommandHandler("olvidar", cmd_olvidar))
     
-    # Captura cualquier mensaje de texto plano para hablar libremente
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_message))
     
     logger.info("Handlers de Telegram registrados (con chat libre y recordatorios).")

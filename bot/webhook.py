@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request, status
@@ -17,7 +18,7 @@ from bot import db
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helper para normalizar la fecha a formato YYYY-MM-DD
+# Helper para normalizar la fecha a formato YYYY-MM-DD (Zona horaria Madrid)
 # ─────────────────────────────────────────────────────────────────────────────
 
 MONTHS_ES = {
@@ -26,9 +27,9 @@ MONTHS_ES = {
 }
 
 def parse_to_iso_date(date_str: Any) -> str:
-    """Convierte fechas como '23 ago 2026, 17:12' o ISO a '2026-08-23'."""
+    """Convierte fechas como '23 ago 2026, 17:12' o ISO a '2026-08-23' usando hora de España."""
     if not date_str:
-        return date.today().isoformat()
+        return datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()
     
     s = str(date_str).strip().lower()
 
@@ -40,10 +41,10 @@ def parse_to_iso_date(date_str: Any) -> str:
         day = int(match.group(1))
         month_str = match.group(2)
         year = int(match.group(3))
-        month = MONTHS_ES.get(month_str, date.today().month)
+        month = MONTHS_ES.get(month_str, datetime.now(ZoneInfo("Europe/Madrid")).month)
         return f"{year:04d}-{month:02d}-{day:02d}"
 
-    return date.today().isoformat()
+    return datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()
 
 
 def parse_float(val: Any) -> Optional[float]:
@@ -152,7 +153,7 @@ async def ping():
 @app.get("/webhook/status")
 async def status_endpoint(x_webhook_token: Optional[str] = Header(default=None)):
     _check_token(x_webhook_token)
-    today = date.today().isoformat()
+    today = datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()
     nutrition = await db.get_daily_nutrition(today)
     workout = await db.get_last_workout()
     weight = await db.get_body_weight(today)

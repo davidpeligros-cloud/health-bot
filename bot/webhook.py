@@ -32,11 +32,9 @@ def parse_to_iso_date(date_str: Any) -> str:
     
     s = str(date_str).strip().lower()
 
-    # Si ya empieza con formato YYYY-MM-DD
     if re.match(r"^\d{4}-\d{2}-\d{2}", s):
         return s[:10]
 
-    # Intentar parsear estilo '23 ago 2026, 17:12' o '23 ago 2026'
     match = re.search(r"(\d{1,2})\s+([a-z]{3})\s+(\d{4})", s)
     if match:
         day = int(match.group(1))
@@ -46,6 +44,21 @@ def parse_to_iso_date(date_str: Any) -> str:
         return f"{year:04d}-{month:02d}-{day:02d}"
 
     return date.today().isoformat()
+
+
+def parse_float(val: Any) -> Optional[float]:
+    """Limpia strings con comas (ej: '108,2018') y los convierte a float de forma segura."""
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        val_clean = val.strip().replace(",", ".")
+        try:
+            return float(val_clean)
+        except ValueError:
+            return None
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -176,36 +189,41 @@ async def receive_health_data(
         nut_raw = cleaned_json.get("nutrition")
         nut_obj = None
 
-        if isinstance(nut_raw, str) and nut_raw:
-            parts = [float(x.strip()) for x in nut_raw.split(",") if x.strip()]
-            if len(parts) >= 4:
-                # Si el iPhone envió valores inflados (ej: 4642 -> 46.42 g de proteína)
-                cal = parts[0]
-                prot = parts[1] / 100.0 if parts[1] > 500 else parts[1]
-                carbs = parts[2] / 1000.0 if parts[2] > 1000 else parts[2]
-                fat = parts[3] / 1000.0 if parts[3] > 1000 else parts[3]
-                
+        if isinstance(nut_raw, dict):
+            nut_obj = {
+                "calories": parse_float(nut_raw.get("calories") or nut_raw.get("kcal")),
+                "protein_g": parse_float(nut_raw.get("protein_g") or nut_raw.get("protein")),
+                "carbs_g": parse_float(nut_raw.get("carbs_g") or nut_raw.get("carbs")),
+                "fat_g": parse_float(nut_raw.get("fat_g") or nut_raw.get("fat")),
+            }
+        else:
+            # Soporte para JSON plano (directo en la raíz como manda tu Atajo)
+            cal = parse_float(cleaned_json.get("calories") or cleaned_json.get("kcal"))
+            prot = parse_float(cleaned_json.get("protein_g") or cleaned_json.get("protein"))
+            carbs = parse_float(cleaned_json.get("carbs_g") or cleaned_json.get("carbs"))
+            fat = parse_float(cleaned_json.get("fat_g") or cleaned_json.get("fat"))
+
+            if any(x is not None for x in [cal, prot, carbs, fat]):
                 nut_obj = {
                     "calories": cal,
                     "protein_g": prot,
                     "carbs_g": carbs,
                     "fat_g": fat,
                 }
-        elif isinstance(nut_raw, dict):
-            nut_obj = {
-                "calories": nut_raw.get("calories") or nut_raw.get("kcal"),
-                "protein_g": nut_raw.get("protein_g") or nut_raw.get("protein"),
-                "carbs_g": nut_raw.get("carbs_g") or nut_raw.get("carbs"),
-                "fat_g": nut_raw.get("fat_g") or nut_raw.get("fat"),
-            }
 
-        weight_val = cleaned_json.get("weight_g") or cleaned_json.get("weight_kg")
+        weight_val = (
+            cleaned_json.get("weight_g") 
+            or cleaned_json.get("weight_kg") 
+            or cleaned_json.get("weigth_kg")
+            or (cleaned_json.get("body") or {}).get("weight_kg")
+        )
         body_obj = None
-        if weight_val:
-            w_float = float(weight_val)
-            if w_float > 300:
-                w_float = w_float / 1000.0
-            body_obj = {"weight_kg": w_float}
+        if weight_val is not None:
+            w_float = parse_float(weight_val)
+            if w_float is not None:
+                if w_float > 300:
+                    w_float = w_float / 1000.0
+                body_obj = {"weight_kg": w_float}
 
         payload_dict = {
             "type": "nutrition_daily",
@@ -244,7 +262,7 @@ async def _handle_nutrition(payload: HealthPayload) -> None:
         carbs_g=n.carbs_g,
         fat_g=n.fat_g,
     )
-    logger.info("Nutrición guardada para %s: kcal=%s, prot=%s", payload.date, n.calories, n.protein_g)
+    logger.info("Nutrición guardada para %s: kcal=%s, prot=%s, carb=%s, fat=%s", payload.date, n.calories, n.protein_g, n.carbs_g, n.fat_g)
 
 
 async def _handle_workout(payload: HealthPayload) -> None:
@@ -260,7 +278,6 @@ async def _handle_workout(payload: HealthPayload) -> None:
         raw=raw,
     )
     logger.info("Entreno guardado: %s (%s)", w.name, payload.date)
-
     await _notify_workout(workout_id, w, payload.date)
 
 

@@ -1,16 +1,19 @@
-"""
+﻿"""
 telegram_handlers.py — Handlers async para todos los comandos y mensajes de Telegram.
+Incluye soporte para /racha, parseo automático de Hevy con progresión, Polar H10 y chat IA.
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 from bot import db, logic
 from bot.ai_advice import get_advice
+from bot.hevy_parser import is_hevy_workout_text, parse_hevy_text, format_hevy_summary
 from bot.scheduler_jobs import schedule_custom_reminder
 
 logger = logging.getLogger(__name__)
@@ -48,12 +51,47 @@ async def cmd_ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# /racha (Racha de días cumpliendo proteína)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_racha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra la racha actual y récord histórico cumpliendo el objetivo de proteína."""
+    streak_data = await logic.get_protein_streak()
+
+    current = streak_data["current_streak"]
+    max_s = streak_data["max_streak"]
+    target = streak_data["protein_target"]
+    today_p = streak_data["today_protein"]
+    today_rem = streak_data["today_remaining"]
+    today_met = streak_data["today_met"]
+    motivation = streak_data["motivation"]
+
+    fire_icons = "🔥" * min(current, 10) if current > 0 else "💤"
+    bar = _progress_bar(today_p, target, width=8)
+    pct = int(today_p / target * 100) if target else 0
+
+    lines = [
+        "🥩 <b>Racha de Proteína</b> 🥩\n",
+        f"{fire_icons} Racha actual: <b>{current} día{'s' if current != 1 else ''}</b>",
+        f"🏆 Récord histórico: <b>{max_s} día{'s' if max_s != 1 else ''}</b>\n",
+        f"🎯 Objetivo diario: <b>{target:.0f} g</b>",
+        f"📊 Progreso de hoy: <b>{today_p:.0f} g</b> ({pct}%)",
+        f"   {bar} " + ("✅ <i>¡Cumplido hoy!</i>" if today_met else f"<i>(faltan {today_rem:.0f} g)</i>"),
+        f"\n💡 <i>{motivation}</i>",
+    ]
+
+    await update.message.reply_html("\n".join(lines))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # /hoy
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     summary = await logic.get_today_summary()
+    streak = await logic.get_protein_streak()
 
     weight_line = (
         f"\n⚖️ Peso: <b>{summary['latest_weight']} kg</b>"
@@ -65,7 +103,7 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         msg = (
             f"📅 <b>Resumen de hoy</b> — {summary['date']}{weight_line}\n\n"
             "⚠️ Aún no hay datos de nutrición para hoy.\n"
-            "Los datos llegarán cuando Atajos ejecute la automatización."
+            "Los datos llegarán cuando Atajos ejecute la automatización o registres en Yazio."
         )
         await update.message.reply_html(msg)
         return
@@ -80,6 +118,7 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     prot_remaining = summary["protein_remaining"]
 
     incomplete_notice = "\n⚠️ <i>Datos incompletos (faltan algunos macros)</i>" if not summary["is_complete"] else ""
+    streak_line = f"\n🔥 Racha de proteína: <b>{streak['current_streak']} días</b>" if streak["current_streak"] > 0 else ""
 
     msg = (
         f"📅 <b>Resumen de hoy</b> — {summary['date']}{weight_line}\n\n"
@@ -90,7 +129,7 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"🥩 <b>Proteína</b>: {summary['protein_consumed']:.0f} / {summary['protein_target']:.0f} g ({prot_pct}%)\n"
         f"   {prot_bar} "
         + (f"✅ <i>objetivo cumplido</i>" if prot_remaining <= 0 else f"({prot_remaining:.0f} g restantes)")
-        + f"\n\n"
+        + f"{streak_line}\n\n"
         f"🍞 <b>Carbos</b>: {summary['carbs_consumed']:.0f} g\n"
         f"🫒 <b>Grasa</b>: {summary['fat_consumed']:.0f} g"
         + incomplete_notice
@@ -105,6 +144,7 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_semana(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     weekly = await logic.get_weekly_summary()
+    streak = await logic.get_protein_streak()
 
     weight_line = f"⚖️ Peso medio: <b>{weekly['avg_weight_kg']} kg</b>" if weekly["avg_weight_kg"] else "⚖️ Sin datos de peso esta semana"
 
@@ -115,7 +155,7 @@ async def cmd_semana(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         trend_line = f"\n   {emoji} Tendencia: {_fmt_diff(trend, ' kg')} respecto al inicio de la semana"
 
     prot_line = (
-        f"🥩 Adherencia proteína: <b>{weekly['protein_adherence_pct']}%</b> de días ≥ {weekly['protein_target']:.0f} g"
+        f"🥩 Adherencia proteína: <b>{weekly['protein_adherence_pct']}%</b> de días ≥ {weekly['protein_target']:.0f} g (🔥 Racha actual: {streak['current_streak']}d)"
         if weekly["protein_adherence_pct"] is not None
         else "🥩 Sin datos de nutrición esta semana"
     )
@@ -131,7 +171,7 @@ async def cmd_semana(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         workout_line += f" ({', '.join(weekly['workout_names'])})"
 
     kcal_line = (
-        f"🔥 Total calorías activas quemadas: {weekly['total_active_kcal']:.0f} kcal"
+        f"🔥 Total calorías activas: {weekly['total_active_kcal']:.0f} kcal"
         if weekly["total_active_kcal"]
         else ""
     )
@@ -238,9 +278,40 @@ async def cmd_entreno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if last.get("name"):
         lines.append(f"🏷 <b>{last['name']}</b>")
     if last.get("duration_min"):
-        lines.append(f"⏱ Duración: {last['duration_min']:.0f} min")
+        lines.append(f"⏱ Duración: <b>{last['duration_min']:.0f} min</b>")
     if last.get("active_energy_kcal"):
-        lines.append(f"🔥 Activas: {last['active_energy_kcal']:.0f} kcal")
+        lines.append(f"🔥 Activas: <b>{last['active_energy_kcal']:.0f} kcal</b>")
+
+    # Mostrar Polar H10 FC
+    if last.get("avg_hr_bpm") or last.get("max_hr_bpm"):
+        hr_parts = []
+        if last.get("avg_hr_bpm"):
+            hr_parts.append(f"<b>{last['avg_hr_bpm']:.0f} bpm</b> media")
+        if last.get("max_hr_bpm"):
+            hr_parts.append(f"<b>{last['max_hr_bpm']:.0f} bpm</b> máx")
+        source = last.get("source") or "fuente no especificada"
+        source_label = "Polar H10" if any(
+            marker in source.lower() for marker in ("polar", "h10")
+        ) else source
+        lines.append(f"❤️ FC: {' | '.join(hr_parts)} <i>({source_label})</i>")
+
+    # Cargar series si están registradas
+    exercises = await db.get_workout_exercises(last["id"])
+    if exercises:
+        lines.append("\n📋 <b>Detalle de ejercicios:</b>")
+        current_ex = None
+        for s in exercises:
+            if s["exercise_name"] != current_ex:
+                current_ex = s["exercise_name"]
+                lines.append(f"🔹 <b>{current_ex}</b>")
+            w_str = f"{s['weight_kg']:.1f}".rstrip("0").rstrip(".") if s.get("weight_kg") is not None else "0"
+            rpe_txt = f" @ RPE {s['rpe']}" if s.get("rpe") else ""
+            if s.get("is_bodyweight"):
+                added = s.get("added_weight_kg") or 0.0
+                load_text = f"peso corporal{f' +{added:g} kg' if added else ''}"
+            else:
+                load_text = f"{w_str} kg"
+            lines.append(f"   • Serie {s['set_number']}: {load_text} × {s['reps']} reps{rpe_txt}")
 
     if last.get("name"):
         comparison = await logic.compare_workout(last["id"], last["name"])
@@ -252,10 +323,58 @@ async def cmd_entreno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 lines.append(f"   ⏱ Duración: {_fmt_diff(diff['duration_min'], ' min')}")
             if diff.get("active_energy_kcal") is not None:
                 lines.append(f"   🔥 Activas: {_fmt_diff(diff['active_energy_kcal'], ' kcal')}")
+            if diff.get("avg_hr_bpm") is not None:
+                lines.append(f"   ❤️ FC media: {_fmt_diff(diff['avg_hr_bpm'], ' bpm')}")
+            if diff.get("max_hr_bpm") is not None:
+                lines.append(f"   ❤️ FC máxima: {_fmt_diff(diff['max_hr_bpm'], ' bpm')}")
         elif not prev:
             lines.append(f"\n📊 Primera sesión de <b>{last['name']}</b> registrada.")
 
     await update.message.reply_html("\n".join(lines))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /hevy (Comando manual o ayuda para texto de Hevy)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_hevy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Permite pegar texto de Hevy directamente como argumento o da instrucciones."""
+    args_text = " ".join(context.args) if context.args else ""
+    if not args_text:
+        await update.message.reply_html(
+            "🏋️‍♂️ <b>Registro de Hevy:</b>\n\n"
+            "Puedes pegar directamente el texto exportado de tu rutina de Hevy en este chat (sin necesidad de escribir /hevy).\n"
+            "El bot detectará automáticamente los ejercicios, series, pesos, reps y calculará tu progresión contra la sesión anterior."
+        )
+        return
+
+    await _process_and_reply_hevy(update, args_text)
+
+
+async def _process_and_reply_hevy(update: Update, text: str) -> None:
+    parsed = parse_hevy_text(text)
+    if not parsed or not parsed.get("exercises"):
+        await update.message.reply_text("⚠️ No pude reconocer las series o ejercicios en el texto de Hevy proporcionado.")
+        return
+
+    workout_id = await db.upsert_workout(
+        date_str=parsed["date"],
+        name=parsed["workout_name"],
+        duration_min=parsed.get("duration_min"),
+        active_energy_kcal=None,
+        source="hevy_text_import",
+        raw=parsed,
+    )
+
+    progression = await logic.compare_exercise_progression(workout_id, parsed["exercises"])
+    await db.save_workout_exercises(workout_id, parsed["date"], parsed["exercises"])
+
+    summary_html = format_hevy_summary(parsed, progression)
+    await update.message.reply_html(summary_html)
+
+    # Registrar en memoria para que el asistente IA lo sepa
+    await db.add_chat_message("user", f"[Entrenamiento Hevy registrado]: {parsed['workout_name']} con {parsed['total_sets']} series y {parsed['total_volume_kg']} kg de volumen.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -290,9 +409,11 @@ async def cmd_recuerdame(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     time_str = args[0]
     message_text = " ".join(args[1:])
 
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("Europe/Madrid"))
     try:
         hour, minute = map(int, time_str.split(":"))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
     except ValueError:
         await update.message.reply_text("⚠️ Formato de hora inválido. Usa HH:MM (ej. 10:00)")
         return
@@ -301,7 +422,7 @@ async def cmd_recuerdame(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if target_time < now:
         target_time += timedelta(days=1)
 
-    schedule_custom_reminder(target_time, message_text)
+    await schedule_custom_reminder(target_time, message_text)
     await update.message.reply_text(f"✅ ¡Apuntado! Te recordaré: '{message_text}' a las {time_str}.")
 
 
@@ -315,19 +436,43 @@ async def cmd_olvidar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text("🧹 Memoria de la conversación borrada correctamente.")
 
 
+async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Crea una copia manual de la base de datos y conserva las últimas copias."""
+    try:
+        backup_path = await db.backup_database()
+    except Exception:
+        logger.exception("No se pudo crear una copia manual desde Telegram")
+        await update.message.reply_text("❌ No se pudo crear la copia de seguridad.")
+        return
+
+    await update.message.reply_text(
+        f"✅ Copia de seguridad creada: {backup_path.name}\n"
+        f"Se conservan las últimas {db.settings.backup_retention_days} copias."
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Chat libre con IA (Mensajes de texto sin comandos)
+# Chat libre con IA & Detección de Hevy
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Permite hablar libremente con el bot sin necesidad de escribir /consejo."""
+    """
+    Detecta automáticamente si el usuario pegó una rutina de Hevy.
+    Si no, procesa la consulta con la IA.
+    """
     user_message = update.message.text
     if not user_message:
         return
 
+    # 1. Comprobar si es un texto de entrenamiento de Hevy
+    if is_hevy_workout_text(user_message):
+        await _process_and_reply_hevy(update, user_message)
+        return
+
+    # 2. Conversación natural con la IA
     wait_msg = await update.message.reply_text("🤔 Analizando tus datos y nuestra conversación… un momento.")
-    
+
     try:
         advice = await get_advice(user_prompt=user_message, context_days=7)
         await context.bot.edit_message_text(
@@ -353,14 +498,17 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 def register_handlers(application: Application) -> None:
     """Registra todos los handlers en la aplicación del bot."""
     application.add_handler(CommandHandler("ping", cmd_ping))
+    application.add_handler(CommandHandler("racha", cmd_racha))
     application.add_handler(CommandHandler("hoy", cmd_hoy))
     application.add_handler(CommandHandler("semana", cmd_semana))
     application.add_handler(CommandHandler("objetivo", cmd_objetivo))
     application.add_handler(CommandHandler("entreno", cmd_entreno))
+    application.add_handler(CommandHandler("hevy", cmd_hevy))
     application.add_handler(CommandHandler("consejo", cmd_consejo))
     application.add_handler(CommandHandler("recuerdame", cmd_recuerdame))
     application.add_handler(CommandHandler("olvidar", cmd_olvidar))
-    
+    application.add_handler(CommandHandler("backup", cmd_backup))
+
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_message))
-    
-    logger.info("Handlers de Telegram registrados (con chat libre y recordatorios).")
+
+    logger.info("Handlers de Telegram registrados (con /racha, Hevy parser y Polar H10).")

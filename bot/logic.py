@@ -1,5 +1,5 @@
-"""
-logic.py — Lógica de negocio: TDEE, déficit, proteína, comparaciones y resúmenes.
+﻿"""
+logic.py — Lógica de negocio: TDEE, déficit, proteína, racha, progresión y comparaciones.
 Todas las funciones son async y acceden a la BD a través de db.py.
 """
 from __future__ import annotations
@@ -135,6 +135,98 @@ async def get_today_summary() -> dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Racha de proteína (/racha)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def get_protein_streak() -> dict[str, Any]:
+    """
+    Calcula la racha actual y el récord de días consecutivos cumpliendo
+    el objetivo de proteína diario.
+    """
+    targets = await db.get_targets()
+    prot_target = (targets or {}).get("protein_target_g") or 160.0
+    all_nutrition = await db.get_all_daily_nutrition(limit=None)
+
+    today_str = _today()
+    # Mapear fecha -> protein_g
+    prot_by_date = {
+        row["date"]: (row.get("protein_g") or 0.0)
+        for row in all_nutrition
+        if row.get("date")
+    }
+
+    today_prot = prot_by_date.get(today_str, 0.0)
+    today_met = today_prot >= prot_target
+
+    # Calcular racha actual hacia atrás
+    current_streak = 0
+    start_date = datetime.now(ZoneInfo("Europe/Madrid")).date()
+
+    # Si hoy ya se cumplió, empezamos a contar desde hoy; si no, desde ayer
+    if today_met:
+        check_date = start_date
+    else:
+        check_date = start_date - timedelta(days=1)
+
+    while True:
+        d_str = check_date.isoformat()
+        p = prot_by_date.get(d_str, 0.0)
+        if p >= prot_target:
+            current_streak += 1
+            check_date -= timedelta(days=1)
+        else:
+            break
+
+    # Récord histórico de racha
+    sorted_dates = sorted(prot_by_date.keys())
+    max_streak = 0
+    temp_streak = 0
+    prev_d: date | None = None
+
+    for d_str in sorted_dates:
+        p = prot_by_date[d_str]
+        cur_d = date.fromisoformat(d_str)
+
+        if p >= prot_target:
+            if prev_d and (cur_d - prev_d).days == 1:
+                temp_streak += 1
+            else:
+                temp_streak = 1
+            max_streak = max(max_streak, temp_streak)
+        else:
+            temp_streak = 0
+
+        prev_d = cur_d
+
+    max_streak = max(max_streak, current_streak)
+
+    # Mensaje motivacional
+    if current_streak == 0:
+        motivation = "🌱 ¡Hoy es el momento perfecto para iniciar tu racha! La proteína construye y protege tu músculo."
+    elif current_streak == 1:
+        motivation = "🔥 ¡Primer día completado! El hábito se construye día a día."
+    elif current_streak < 4:
+        motivation = "⚡ ¡Gran comienzo! Mantén la consistencia y la masa muscular estará a salvo."
+    elif current_streak < 7:
+        motivation = "🚀 ¡Ritmo imparable! Tu constancia con la proteína está dando resultados."
+    elif current_streak < 14:
+        motivation = "🏆 ¡Más de una semana perfecta! Disciplina de acero protegiendo tu masa muscular."
+    else:
+        motivation = "👑 ¡Nivel Leyenda! Tu disciplina con la nutrición es impecable."
+
+    return {
+        "current_streak": current_streak,
+        "max_streak": max_streak,
+        "protein_target": prot_target,
+        "today_protein": round(today_prot, 1),
+        "today_met": today_met,
+        "today_remaining": max(0.0, round(prot_target - today_prot, 1)),
+        "motivation": motivation,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Resumen semanal
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -209,12 +301,12 @@ async def get_weekly_summary(days: int = 7) -> dict[str, Any]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Comparación de entrenos
+# Comparación de entrenos y progresión de ejercicios
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 async def compare_workout(workout_id: str, name: str | None) -> dict[str, Any]:
-    """Compara el entreno actual con el anterior del mismo tipo."""
+    """Compara el entreno actual con el anterior del mismo tipo incluyendo FC Polar H10."""
     current = await db.get_last_workout(name)
     previous = await db.get_previous_same_workout(workout_id, name or "") if name else None
 
@@ -223,13 +315,68 @@ async def compare_workout(workout_id: str, name: str | None) -> dict[str, Any]:
     if current and previous:
         dur_diff = None
         kcal_diff = None
+        hr_avg_diff = None
+        hr_max_diff = None
+
         if current.get("duration_min") and previous.get("duration_min"):
             dur_diff = round(current["duration_min"] - previous["duration_min"], 1)
         if current.get("active_energy_kcal") and previous.get("active_energy_kcal"):
             kcal_diff = round(current["active_energy_kcal"] - previous["active_energy_kcal"], 1)
-        result["diff"] = {"duration_min": dur_diff, "active_energy_kcal": kcal_diff}
+        if current.get("avg_hr_bpm") and previous.get("avg_hr_bpm"):
+            hr_avg_diff = round(current["avg_hr_bpm"] - previous["avg_hr_bpm"], 1)
+        if current.get("max_hr_bpm") and previous.get("max_hr_bpm"):
+            hr_max_diff = round(current["max_hr_bpm"] - previous["max_hr_bpm"], 1)
+
+        result["diff"] = {
+            "duration_min": dur_diff,
+            "active_energy_kcal": kcal_diff,
+            "avg_hr_bpm": hr_avg_diff,
+            "max_hr_bpm": hr_max_diff,
+        }
 
     return result
+
+
+async def compare_exercise_progression(
+    workout_id: str,
+    exercises: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """
+    Calcula la progresión de cada ejercicio vs su sesión anterior registrada en BD.
+    """
+    progression: list[dict[str, Any]] = []
+
+    for ex in exercises:
+        ex_name = ex["name"]
+        cur_volume = ex.get("total_volume_kg", 0.0)
+        cur_best_w = ex.get("best_set", {}).get("weight_kg", 0.0)
+
+        prev_sets = await db.get_previous_exercise_sets(ex_name, current_workout_id=workout_id)
+
+        if not prev_sets:
+            progression.append({
+                "exercise_name": ex_name,
+                "has_previous": False,
+            })
+            continue
+
+        prev_volume = sum((s.get("weight_kg") or 0.0) * (s.get("reps") or 0) for s in prev_sets)
+        prev_best_w = max((s.get("weight_kg") or 0.0) for s in prev_sets) if prev_sets else 0.0
+
+        weight_diff = round(cur_best_w - prev_best_w, 1)
+        volume_diff = round(cur_volume - prev_volume, 1)
+
+        progression.append({
+            "exercise_name": ex_name,
+            "has_previous": True,
+            "prev_date": prev_sets[0].get("date"),
+            "weight_diff": weight_diff,
+            "volume_diff": volume_diff,
+            "cur_best_w": cur_best_w,
+            "prev_best_w": prev_best_w,
+        })
+
+    return progression
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -247,10 +394,12 @@ async def build_ai_context(days: int = 7) -> dict[str, Any]:
     workout_rows = await db.get_workouts_range(start, end)
     weight_rows = await db.get_weight_range(start, end)
     weekly = await get_weekly_summary(days)
+    streak = await get_protein_streak()
 
     return {
         "today": _today(),
         "targets": targets,
+        "protein_streak": streak,
         "weekly_summary": weekly,
         "nutrition_last_7_days": nutrition_rows,
         "workouts_last_7_days": [

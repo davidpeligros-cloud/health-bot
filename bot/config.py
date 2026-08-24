@@ -35,12 +35,15 @@ class Settings(BaseSettings):
     # ── Scheduler ─────────────────────────────────────────────────────────────
     morning_summary_time: str = "08:00"
     night_check_time: str = "22:00"
+    backup_time: str = "03:30"
     weekly_summary_day: int = 6  # 0=lunes, 6=domingo
 
     # ── Base de datos ─────────────────────────────────────────────────────────
     database_path: str = "./data/health_bot.db"
+    backup_dir: str = "./data/backups"
+    backup_retention_days: int = 14
 
-    @field_validator("morning_summary_time", "night_check_time", mode="before")
+    @field_validator("morning_summary_time", "night_check_time", "backup_time", mode="before")
     @classmethod
     def validate_time_format(cls, v: str) -> str:
         parts = v.split(":")
@@ -58,12 +61,24 @@ class Settings(BaseSettings):
             raise ValueError("weekly_summary_day debe estar entre 0 (lunes) y 6 (domingo)")
         return v
 
+    @field_validator("backup_retention_days", mode="before")
+    @classmethod
+    def validate_backup_retention(cls, v: int) -> int:
+        value = int(v)
+        if value < 1:
+            raise ValueError("backup_retention_days debe ser al menos 1")
+        return value
+
     def get_morning_hour_minute(self) -> tuple[int, int]:
         h, m = self.morning_summary_time.split(":")
         return int(h), int(m)
 
     def get_night_hour_minute(self) -> tuple[int, int]:
         h, m = self.night_check_time.split(":")
+        return int(h), int(m)
+
+    def get_backup_hour_minute(self) -> tuple[int, int]:
+        h, m = self.backup_time.split(":")
         return int(h), int(m)
 
     @property

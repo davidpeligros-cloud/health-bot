@@ -15,7 +15,7 @@ from telegram.ext import Application
 
 from bot.config import settings
 from bot.db import init_db
-from bot.scheduler_jobs import create_scheduler, set_bot_app
+from bot.scheduler_jobs import create_scheduler, restore_scheduled_reminders, set_bot_app
 from bot.telegram_handlers import register_handlers
 from bot.webhook import app as fastapi_app, set_telegram_app
 
@@ -57,6 +57,7 @@ async def main() -> None:
 
     # 4. Configurar y arrancar scheduler
     scheduler = create_scheduler()
+    await restore_scheduled_reminders(scheduler)
     scheduler.start()
     logger.info("Scheduler APScheduler iniciado.")
 

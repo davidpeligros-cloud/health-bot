@@ -1,4 +1,4 @@
-"""
+﻿"""
 db.py — Acceso asíncrono a SQLite con aiosqlite.
 Incluye inicialización del esquema y todas las funciones CRUD.
 """
@@ -7,7 +7,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
+import asyncio
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import aiosqlite
@@ -38,8 +41,24 @@ CREATE TABLE IF NOT EXISTS workouts (
     name               TEXT,
     duration_min       REAL,
     active_energy_kcal REAL,
+    avg_hr_bpm         REAL,
+    max_hr_bpm         REAL,
     source             TEXT DEFAULT 'hevy_healthkit',
     raw_json           TEXT
+);
+
+CREATE TABLE IF NOT EXISTS workout_exercises (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    workout_id    TEXT NOT NULL,
+    date          TEXT NOT NULL,
+    exercise_name TEXT NOT NULL,
+    set_number    INTEGER NOT NULL,
+    weight_kg     REAL,
+    is_bodyweight INTEGER NOT NULL DEFAULT 0,
+    added_weight_kg REAL,
+    reps          INTEGER,
+    rpe           REAL,
+    FOREIGN KEY(workout_id) REFERENCES workouts(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS body_weight (
@@ -64,6 +83,13 @@ CREATE TABLE IF NOT EXISTS reminders_log (
     PRIMARY KEY (date, reminder_type)
 );
 
+CREATE TABLE IF NOT EXISTS scheduled_reminders (
+    id         TEXT PRIMARY KEY,
+    run_at     TEXT NOT NULL,
+    message    TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS chat_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT NOT NULL,
@@ -74,12 +100,35 @@ CREATE TABLE IF NOT EXISTS chat_history (
 
 
 async def init_db() -> None:
-    """Crea el directorio de datos y las tablas si no existen."""
+    """Crea el directorio de datos, las tablas y aplica migraciones si no existen."""
     db_path = settings.database_path
     os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
 
     async with aiosqlite.connect(db_path) as db:
         await db.executescript(SCHEMA_SQL)
+        await db.commit()
+
+        # Migraciones dinámicas seguras para tablas existentes
+        async with db.execute("PRAGMA table_info(workouts)") as cur:
+            columns = [row[1] for row in await cur.fetchall()]
+            if "avg_hr_bpm" not in columns:
+                await db.execute("ALTER TABLE workouts ADD COLUMN avg_hr_bpm REAL")
+                logger.info("Migración aplicada: columna avg_hr_bpm añadida a workouts")
+            if "max_hr_bpm" not in columns:
+                await db.execute("ALTER TABLE workouts ADD COLUMN max_hr_bpm REAL")
+                logger.info("Migración aplicada: columna max_hr_bpm añadida a workouts")
+
+        async with db.execute("PRAGMA table_info(workout_exercises)") as cur:
+            exercise_columns = [row[1] for row in await cur.fetchall()]
+            if "is_bodyweight" not in exercise_columns:
+                await db.execute(
+                    "ALTER TABLE workout_exercises ADD COLUMN is_bodyweight INTEGER NOT NULL DEFAULT 0"
+                )
+            if "added_weight_kg" not in exercise_columns:
+                await db.execute(
+                    "ALTER TABLE workout_exercises ADD COLUMN added_weight_kg REAL"
+                )
+
         await db.commit()
 
     # Insertar fila de targets por defecto si está vacía
@@ -121,34 +170,59 @@ def _today() -> str:
     return date.today().isoformat()
 
 
+async def backup_database() -> Path:
+    """Crea una copia consistente de SQLite y elimina copias antiguas."""
+    source_path = Path(settings.database_path)
+    backup_dir = Path(settings.backup_dir)
+
+    def create_backup() -> Path:
+        if not source_path.exists():
+            raise FileNotFoundError(f"No existe la base de datos: {source_path}")
+
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup_path = backup_dir / f"health_bot_{timestamp}.db"
+        with sqlite3.connect(source_path) as source, sqlite3.connect(backup_path) as target:
+            source.backup(target)
+
+        backups = sorted(backup_dir.glob("health_bot_*.db"), reverse=True)
+        for old_backup in backups[settings.backup_retention_days:]:
+            old_backup.unlink(missing_ok=True)
+        return backup_path
+
+    return await asyncio.to_thread(create_backup)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# chat_history (Memoria de la IA)
+# chat_history (Memoria para el asistente IA)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 async def add_chat_message(role: str, content: str) -> None:
-    """Guarda un mensaje en el historial (role: 'user' o 'assistant')."""
+    """Guarda un mensaje en el historial del chat (user o assistant)."""
     async with aiosqlite.connect(settings.database_path) as db:
         await db.execute(
             "INSERT INTO chat_history (role, content) VALUES (?, ?)",
-            (role, content)
+            (role, content),
         )
         await db.commit()
 
 
 async def get_recent_chat_history(limit: int = 10) -> list[dict[str, str]]:
-    """Obtiene los últimos N mensajes para darle contexto continuo a la IA."""
+    """Devuelve los últimos N mensajes para pasarlos como contexto a Claude."""
     async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT role, content FROM chat_history ORDER BY id DESC LIMIT ?",
-            (limit,)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [{"role": row[0], "content": row[1]} for row in reversed(rows)]
+            (limit,),
+        ) as cur:
+            rows = await cur.fetchall()
+            messages = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+            return messages
 
 
 async def clear_chat_history() -> None:
-    """Limpia el historial de conversación con la IA."""
+    """Borra el historial de la conversación con el bot."""
     async with aiosqlite.connect(settings.database_path) as db:
         await db.execute("DELETE FROM chat_history")
         await db.commit()
@@ -161,13 +235,14 @@ async def clear_chat_history() -> None:
 
 async def upsert_daily_nutrition(
     date_str: str,
-    calories: float | None,
-    protein_g: float | None,
-    carbs_g: float | None,
-    fat_g: float | None,
+    calories: float | None = None,
+    protein_g: float | None = None,
+    carbs_g: float | None = None,
+    fat_g: float | None = None,
     source: str = "healthkit",
 ) -> None:
-    is_complete = all(v is not None for v in [calories, protein_g, carbs_g, fat_g])
+    now = _now_iso()
+    is_complete = int(all(x is not None for x in (calories, protein_g, carbs_g, fat_g)))
     async with aiosqlite.connect(settings.database_path) as db:
         await db.execute(
             """
@@ -183,7 +258,7 @@ async def upsert_daily_nutrition(
                 source      = excluded.source,
                 updated_at  = excluded.updated_at
             """,
-            (date_str, calories, protein_g, carbs_g, fat_g, int(is_complete), source, _now_iso()),
+            (date_str, calories, protein_g, carbs_g, fat_g, is_complete, source, now),
         )
         await db.commit()
 
@@ -209,6 +284,20 @@ async def get_nutrition_range(start: str, end: str) -> list[dict[str, Any]]:
             return [dict(r) for r in rows]
 
 
+async def get_all_daily_nutrition(limit: int | None = 365) -> list[dict[str, Any]]:
+    """Devuelve los registros diarios ordenados por fecha descendente."""
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        query = "SELECT * FROM daily_nutrition ORDER BY date DESC"
+        params: tuple[int, ...] = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            params = (limit,)
+        async with db.execute(query, params) as cur:
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # workouts
 # ─────────────────────────────────────────────────────────────────────────────
@@ -225,6 +314,8 @@ async def upsert_workout(
     name: str | None,
     duration_min: float | None,
     active_energy_kcal: float | None,
+    avg_hr_bpm: float | None = None,
+    max_hr_bpm: float | None = None,
     source: str = "hevy_healthkit",
     raw: dict | None = None,
 ) -> str:
@@ -233,11 +324,13 @@ async def upsert_workout(
         await db.execute(
             """
             INSERT INTO workouts
-                (id, date, name, duration_min, active_energy_kcal, source, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (id, date, name, duration_min, active_energy_kcal, avg_hr_bpm, max_hr_bpm, source, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 duration_min       = COALESCE(excluded.duration_min, workouts.duration_min),
                 active_energy_kcal = COALESCE(excluded.active_energy_kcal, workouts.active_energy_kcal),
+                avg_hr_bpm         = COALESCE(excluded.avg_hr_bpm, workouts.avg_hr_bpm),
+                max_hr_bpm         = COALESCE(excluded.max_hr_bpm, workouts.max_hr_bpm),
                 source             = excluded.source,
                 raw_json           = COALESCE(excluded.raw_json, workouts.raw_json)
             """,
@@ -247,8 +340,10 @@ async def upsert_workout(
                 name,
                 duration_min,
                 active_energy_kcal,
+                avg_hr_bpm,
+                max_hr_bpm,
                 source,
-                json.dumps(raw) if raw else None,
+                json.dumps(raw, ensure_ascii=False) if raw else None,
             ),
         )
         await db.commit()
@@ -301,6 +396,100 @@ async def get_previous_same_workout(current_id: str, name: str) -> dict[str, Any
         ) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# workout_exercises (Series y ejercicios de Hevy)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def save_workout_exercises(workout_id: str, date_str: str, exercises: list[dict[str, Any]]) -> None:
+    """Guarda las series individuales de cada ejercicio de una sesión."""
+    async with aiosqlite.connect(settings.database_path) as db:
+        # Limpiar series previas para este workout_id si se está re-procesando
+        await db.execute("DELETE FROM workout_exercises WHERE workout_id = ?", (workout_id,))
+
+        for ex in exercises:
+            ex_name = ex.get("name", "Desconocido")
+            for s in ex.get("sets", []):
+                await db.execute(
+                    """
+                    INSERT INTO workout_exercises
+                        (workout_id, date, exercise_name, set_number, weight_kg,
+                         is_bodyweight, added_weight_kg, reps, rpe)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        workout_id,
+                        date_str,
+                        ex_name,
+                        s.get("set_number", 1),
+                        s.get("weight_kg"),
+                        int(bool(s.get("is_bodyweight", False))),
+                        s.get("added_weight_kg", 0.0),
+                        s.get("reps"),
+                        s.get("rpe"),
+                    ),
+                )
+        await db.commit()
+
+
+async def get_workout_exercises(workout_id: str) -> list[dict[str, Any]]:
+    """Devuelve las series registradas para un entreno específico."""
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+                 SELECT exercise_name, set_number, weight_kg, is_bodyweight,
+                     added_weight_kg, reps, rpe
+            FROM workout_exercises
+            WHERE workout_id = ?
+            ORDER BY exercise_name, set_number
+            """,
+            (workout_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+
+
+async def get_previous_exercise_sets(exercise_name: str, current_workout_id: str | None = None) -> list[dict[str, Any]]:
+    """
+    Busca la sesión más reciente anterior donde se realizó este ejercicio
+    y devuelve sus series.
+    """
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        # 1. Encontrar la última fecha/workout_id en la que se hizo el ejercicio
+        query = """
+            SELECT workout_id, date
+            FROM workout_exercises
+            WHERE LOWER(exercise_name) = LOWER(?)
+        """
+        params = [exercise_name]
+        if current_workout_id:
+            query += " AND workout_id != ?"
+            params.append(current_workout_id)
+
+        query += " ORDER BY date DESC, id DESC LIMIT 1"
+
+        async with db.execute(query, params) as cur:
+            last_session = await cur.fetchone()
+
+        if not last_session:
+            return []
+
+        prev_wid = last_session["workout_id"]
+        async with db.execute(
+            """
+            SELECT set_number, weight_kg, reps, rpe, date
+            FROM workout_exercises
+            WHERE workout_id = ? AND LOWER(exercise_name) = LOWER(?)
+            ORDER BY set_number
+            """,
+            (prev_wid, exercise_name),
+        ) as cur:
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -391,4 +580,32 @@ async def mark_reminder_sent(date_str: str, reminder_type: str) -> None:
             """,
             (date_str, reminder_type, _now_iso()),
         )
+        await db.commit()
+
+
+async def add_scheduled_reminder(reminder_id: str, run_at: str, message: str) -> None:
+    async with aiosqlite.connect(settings.database_path) as db:
+        await db.execute(
+            """
+            INSERT INTO scheduled_reminders (id, run_at, message, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (reminder_id, run_at, message, _now_iso()),
+        )
+        await db.commit()
+
+
+async def get_scheduled_reminders() -> list[dict[str, Any]]:
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, run_at, message FROM scheduled_reminders ORDER BY run_at"
+        ) as cur:
+            rows = await cur.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def delete_scheduled_reminder(reminder_id: str) -> None:
+    async with aiosqlite.connect(settings.database_path) as db:
+        await db.execute("DELETE FROM scheduled_reminders WHERE id = ?", (reminder_id,))
         await db.commit()

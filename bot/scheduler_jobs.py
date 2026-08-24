@@ -5,7 +5,9 @@ Resumen matutino, aviso nocturno, resumen semanal y recordatorios dinámicos.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -25,18 +27,20 @@ def set_bot_app(app) -> None:
     _bot_app = app
 
 
-async def _send(text: str) -> None:
+async def _send(text: str) -> bool:
     if _bot_app is None:
         logger.warning("Bot no disponible para scheduler.")
-        return
+        return False
     try:
         await _bot_app.bot.send_message(
             chat_id=settings.telegram_chat_id,
             text=text,
             parse_mode="HTML",
         )
+        return True
     except Exception as exc:
         logger.error("Scheduler no pudo enviar mensaje: %s", exc)
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -50,20 +54,62 @@ async def send_reminder_job(text: str) -> None:
     logger.info("Recordatorio dinámico enviado: %s", text)
 
 
-def schedule_custom_reminder(run_date: datetime, text: str) -> None:
-    """Añade un recordatorio único al scheduler activo."""
+async def schedule_custom_reminder(run_date: datetime, text: str) -> str:
+    """Persiste y programa un recordatorio único."""
     global _global_scheduler
-    if _global_scheduler:
+    reminder_id = f"reminder_{uuid4().hex}"
+    await db.add_scheduled_reminder(reminder_id, run_date.isoformat(), text)
+    if _global_scheduler and _global_scheduler.running:
         _global_scheduler.add_job(
-            send_reminder_job,
+            send_persisted_reminder_job,
             trigger=DateTrigger(run_date=run_date),
-            args=[text],
-            id=f"reminder_{run_date.timestamp()}",
+            args=[reminder_id, text],
+            id=reminder_id,
             replace_existing=True,
         )
         logger.info("Recordatorio programado con éxito para: %s", run_date)
     else:
-        logger.warning("No se pudo programar el recordatorio: scheduler no inicializado.")
+        logger.warning("Recordatorio guardado; se programará al arrancar el scheduler.")
+    return reminder_id
+
+
+async def send_persisted_reminder_job(reminder_id: str, text: str) -> None:
+    """Envía un recordatorio persistido y lo elimina tras el envío."""
+    sent = await _send(f"⏰ <b>¡Recordatorio!</b>\n\n{text}")
+    if sent:
+        await db.delete_scheduled_reminder(reminder_id)
+        logger.info("Recordatorio dinámico enviado: %s", text)
+        return
+
+    if _global_scheduler and _global_scheduler.running:
+        retry_at = datetime.now(ZoneInfo("Europe/Madrid")) + timedelta(minutes=5)
+        _global_scheduler.add_job(
+            send_persisted_reminder_job,
+            trigger=DateTrigger(run_date=retry_at),
+            args=[reminder_id, text],
+            id=reminder_id,
+            replace_existing=True,
+        )
+        logger.warning("Recordatorio %s reintentará enviarse a las %s", reminder_id, retry_at)
+
+
+async def restore_scheduled_reminders(scheduler: AsyncIOScheduler) -> None:
+    """Restaura recordatorios guardados tras un reinicio del proceso."""
+    now = datetime.now(ZoneInfo("Europe/Madrid"))
+    for reminder in await db.get_scheduled_reminders():
+        run_date = datetime.fromisoformat(reminder["run_at"])
+        if run_date.tzinfo is None:
+            run_date = run_date.replace(tzinfo=ZoneInfo("Europe/Madrid"))
+        if run_date <= now:
+            run_date = now + timedelta(seconds=1)
+        scheduler.add_job(
+            send_persisted_reminder_job,
+            trigger=DateTrigger(run_date=run_date),
+            args=[reminder["id"], reminder["message"]],
+            id=reminder["id"],
+            replace_existing=True,
+        )
+    logger.info("Recordatorios persistidos restaurados.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -191,6 +237,15 @@ async def job_weekly_summary() -> None:
     logger.info("Resumen semanal enviado para %s", today)
 
 
+async def job_database_backup() -> None:
+    """Genera la copia diaria sin bloquear el event loop del bot."""
+    try:
+        backup_path = await db.backup_database()
+        logger.info("Copia de seguridad creada: %s", backup_path)
+    except Exception:
+        logger.exception("No se pudo crear la copia de seguridad")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuración del scheduler
 # ─────────────────────────────────────────────────────────────────────────────
@@ -203,6 +258,7 @@ def create_scheduler() -> AsyncIOScheduler:
 
     morning_h, morning_m = settings.get_morning_hour_minute()
     night_h, night_m = settings.get_night_hour_minute()
+    backup_h, backup_m = settings.get_backup_hour_minute()
     weekly_day = settings.weekly_summary_day
 
     scheduler.add_job(
@@ -226,8 +282,15 @@ def create_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    scheduler.add_job(
+        job_database_backup,
+        trigger=CronTrigger(hour=backup_h, minute=backup_m),
+        id="database_backup",
+        replace_existing=True,
+    )
+
     logger.info(
-        "Scheduler configurado: mañana %02d:%02d, noche %02d:%02d, semanal día %d a las 21:00",
-        morning_h, morning_m, night_h, night_m, weekly_day,
+        "Scheduler configurado: mañana %02d:%02d, noche %02d:%02d, backup %02d:%02d, semanal día %d a las 21:00",
+        morning_h, morning_m, night_h, night_m, backup_h, backup_m, weekly_day,
     )
     return scheduler

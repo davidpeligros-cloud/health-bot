@@ -32,6 +32,28 @@ def _n_days_ago(n: int) -> str:
     return (current_date - timedelta(days=n)).isoformat()
 
 
+def _month_bounds(month: str | None = None) -> tuple[str, str, str]:
+    """Devuelve inicio, fin y etiqueta YYYY-MM de un mes válido."""
+    if month is None:
+        current = datetime.now(ZoneInfo("Europe/Madrid"))
+        year, month_number = current.year, current.month
+        month_key = f"{year:04d}-{month_number:02d}"
+    else:
+        try:
+            parsed = datetime.strptime(month, "%Y-%m")
+        except ValueError as exc:
+            raise ValueError("El mes debe tener formato YYYY-MM") from exc
+        year, month_number = parsed.year, parsed.month
+        month_key = month
+
+    start_date = date(year, month_number, 1)
+    if month_number == 12:
+        end_date = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        end_date = date(year, month_number + 1, 1) - timedelta(days=1)
+    return start_date.isoformat(), end_date.isoformat(), month_key
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Peso y TDEE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -297,6 +319,65 @@ async def get_weekly_summary(days: int = 7) -> dict[str, Any]:
         "total_active_kcal": round(total_kcal_burned, 1) if total_kcal_burned else None,
         "protein_target": prot_target,
         "calorie_target": cal_target,
+    }
+
+
+async def get_season_summary(month: str | None = None) -> dict[str, Any]:
+    """Calcula la temporada mensual con XP, récords y ejercicio estrella."""
+    start, end, month_key = _month_bounds(month)
+    workouts = await db.get_workouts_range(start, end)
+    nutrition = await db.get_nutrition_range(start, end)
+    current_sets = await db.get_exercise_sets_range(start, end)
+    all_sets = await db.get_all_exercise_sets()
+    targets = await db.get_targets()
+    protein_target = (targets or {}).get("protein_target_g") or 160.0
+
+    protein_days = sum(
+        1 for row in nutrition
+        if row.get("protein_g") is not None and row["protein_g"] >= protein_target
+    )
+    total_volume = round(sum(
+        (row.get("weight_kg") or 0.0) * (row.get("reps") or 0)
+        for row in current_sets
+    ), 1)
+
+    current_max: dict[str, float] = {}
+    previous_max: dict[str, float] = {}
+    volume_by_exercise: dict[str, float] = {}
+    for row in all_sets:
+        name = row.get("exercise_name")
+        weight = row.get("weight_kg")
+        if not name or weight is None:
+            continue
+        if row["date"] < start:
+            previous_max[name.casefold()] = max(previous_max.get(name.casefold(), 0.0), weight)
+        elif row["date"] <= end:
+            key = name.casefold()
+            current_max[key] = max(current_max.get(key, 0.0), weight)
+            volume_by_exercise[name] = volume_by_exercise.get(name, 0.0) + weight * (row.get("reps") or 0)
+
+    personal_records = [
+        name for name, weight in current_max.items()
+        if name in previous_max and weight > previous_max[name]
+    ]
+    star = max(volume_by_exercise, key=volume_by_exercise.get) if volume_by_exercise else None
+    xp = (
+        len(workouts) * 100
+        + protein_days * 25
+        + len(personal_records) * 100
+        + int(total_volume / 1000)
+    )
+
+    return {
+        "month": month_key,
+        "num_workouts": len(workouts),
+        "total_volume_kg": total_volume,
+        "protein_days": protein_days,
+        "personal_records": len(personal_records),
+        "personal_record_names": personal_records,
+        "star_exercise": star,
+        "xp": xp,
+        "level": xp // 250 + 1,
     }
 
 

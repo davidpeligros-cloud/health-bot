@@ -17,6 +17,11 @@ MONTHS_ES = {
     "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
 }
 
+MONTHS_EN = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
 
 def _today_madrid() -> str:
     return datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()
@@ -84,6 +89,13 @@ def parse_hevy_text(text: str) -> Optional[dict[str, Any]]:
     first_line = lines[0]
     if not re.search(r"(?:serie|set|\d+\s*kg)", first_line, re.IGNORECASE):
         clean_title = re.sub(r"^[🏋️‍♂️💪🔥📝\s]+", "", first_line).strip()
+        clean_title = re.sub(
+            r"\s+(?:lunes|martes|miércoles|jueves|viernes|sábado|domingo|monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+"
+            r"(?:ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic|jan|apr|aug|dec)\s+\d{1,2},?\s+\d{4}.*$",
+            "",
+            clean_title,
+            flags=re.IGNORECASE,
+        ).strip()
         if clean_title:
             workout_name = clean_title
 
@@ -100,6 +112,19 @@ def parse_hevy_text(text: str) -> Optional[dict[str, Any]]:
             m = MONTHS_ES.get(m_str, 1)
             workout_date = f"{y:04d}-{m:02d}-{d:02d}"
             break
+
+        en_match = re.search(
+            r"(?:lunes|martes|miércoles|jueves|viernes|sábado|domingo|monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+"
+            r"([a-z]+)\s+(\d{1,2}),?\s+(\d{4})",
+            line,
+            re.IGNORECASE,
+        )
+        if en_match:
+            m_str = en_match.group(1).lower()[:3]
+            m = MONTHS_ES.get(m_str) or MONTHS_EN.get(m_str)
+            if m:
+                workout_date = f"{int(en_match.group(3)):04d}-{m:02d}-{int(en_match.group(2)):02d}"
+                break
 
         dur_h_m = re.search(r"(?:(\d+)\s*h)?\s*(\d+)\s*(?:min|m)", line, re.IGNORECASE)
         if dur_h_m:
@@ -132,12 +157,96 @@ def parse_hevy_text(text: str) -> Optional[dict[str, Any]]:
         re.IGNORECASE
     )
 
+    inline_set_marker = re.compile(r"(?:set|serie)\s*(\d+)\s*[:\-]", re.IGNORECASE)
+
+    def add_set(exercise: dict[str, Any], set_number: int, weight_kg: float,
+                reps: int, rpe: Optional[float] = None,
+                is_bodyweight: bool = False, added_weight_kg: float = 0.0) -> None:
+        set_data = {
+            "set_number": set_number,
+            "weight_kg": weight_kg,
+            "is_bodyweight": is_bodyweight,
+            "added_weight_kg": added_weight_kg if is_bodyweight else 0.0,
+            "reps": reps,
+            "rpe": rpe,
+            "volume_kg": round(weight_kg * reps, 1),
+        }
+        exercise["sets"].append(set_data)
+        exercise["total_volume_kg"] = round(
+            exercise["total_volume_kg"] + weight_kg * reps, 1
+        )
+        best = exercise["best_set"]
+        if not best or (weight_kg > best["weight_kg"]) or (
+            weight_kg == best["weight_kg"] and reps > best["reps"]
+        ):
+            exercise["best_set"] = {"weight_kg": weight_kg, "reps": reps}
+
     for line in lines:
         if line == first_line and workout_name == first_line:
             continue
         if re.search(r"^(?:lunes|martes|miércoles|jueves|viernes|sábado|domingo|\d{1,2}\s+de)", line, re.IGNORECASE):
             continue
         if re.search(r"^(?:hevy|compartido desde|workout summary)", line, re.IGNORECASE):
+            continue
+
+        inline_markers = list(inline_set_marker.finditer(line))
+        if inline_markers:
+            exercise_name = line[:inline_markers[0].start()].strip()
+            exercise_name = re.sub(r"^[\d\.\-\)•\*]+\s*", "", exercise_name).strip()
+            if exercise_name:
+                current_exercise = {
+                    "name": exercise_name,
+                    "sets": [],
+                    "total_volume_kg": 0.0,
+                    "best_set": None,
+                }
+                exercises.append(current_exercise)
+
+            if current_exercise is None:
+                current_exercise = {
+                    "name": "Ejercicio General",
+                    "sets": [],
+                    "total_volume_kg": 0.0,
+                    "best_set": None,
+                }
+                exercises.append(current_exercise)
+
+            for index, marker in enumerate(inline_markers):
+                end = inline_markers[index + 1].start() if index + 1 < len(inline_markers) else len(line)
+                segment = line[marker.end():end]
+                set_number = int(marker.group(1))
+                bodyweight_match = re.search(
+                    r"(?:bw|body\s*weight|peso\s*corporal)\s*[x×]\s*(\d+)",
+                    segment,
+                    re.IGNORECASE,
+                )
+                if bodyweight_match:
+                    add_set(current_exercise, set_number, 0.0, int(bodyweight_match.group(1)), is_bodyweight=True)
+                    continue
+
+                load_match = re.search(
+                    r"(\+?\s*\d+[\.,]?\d*)\s*(kg|kilos|lbs)?\s*[x×]\s*(\d+)\s*(?:reps?|repeticiones)?",
+                    segment,
+                    re.IGNORECASE,
+                )
+                if not load_match:
+                    continue
+                weight = float(load_match.group(1).replace("+", "").replace(",", ".").strip())
+                if load_match.group(2) and load_match.group(2).lower() == "lbs":
+                    weight = round(weight * 0.45359237, 2)
+                reps = int(load_match.group(3))
+                rpe_match = re.search(r"rpe\s*(\d+[\.,]?\d*)", segment, re.IGNORECASE)
+                rpe = float(rpe_match.group(1).replace(",", ".")) if rpe_match else None
+                is_added_load = load_match.group(1).strip().startswith("+")
+                add_set(
+                    current_exercise,
+                    set_number,
+                    weight,
+                    reps,
+                    rpe=rpe,
+                    is_bodyweight=is_added_load,
+                    added_weight_kg=weight if is_added_load else 0.0,
+                )
             continue
 
         set_num: Optional[int] = None
@@ -203,22 +312,15 @@ def parse_hevy_text(text: str) -> Optional[dict[str, Any]]:
             if set_num is None:
                 set_num = len(current_exercise["sets"]) + 1
 
-            set_data = {
-                "set_number": set_num,
-                "weight_kg": weight_kg,
-                "is_bodyweight": is_bodyweight,
-                "added_weight_kg": added_weight_kg if is_bodyweight else 0.0,
-                "reps": reps,
-                "rpe": rpe,
-                "volume_kg": round(weight_kg * reps, 1)
-            }
-            current_exercise["sets"].append(set_data)
-            current_exercise["total_volume_kg"] = round(
-                current_exercise["total_volume_kg"] + (weight_kg * reps), 1
+            add_set(
+                current_exercise,
+                set_num,
+                weight_kg,
+                reps,
+                rpe=rpe,
+                is_bodyweight=is_bodyweight,
+                added_weight_kg=added_weight_kg,
             )
-            best = current_exercise["best_set"]
-            if not best or (weight_kg > best["weight_kg"]) or (weight_kg == best["weight_kg"] and reps > best["reps"]):
-                current_exercise["best_set"] = {"weight_kg": weight_kg, "reps": reps}
         else:
             clean_name = re.sub(r"^\d+[\.\-\)]\s*", "", line).strip()
             clean_name = re.sub(r"^[•\-\*🏋️‍♂️💪🔥]\s*", "", clean_name).strip()

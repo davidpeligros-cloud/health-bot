@@ -452,6 +452,40 @@ async def get_workout_exercises(workout_id: str) -> list[dict[str, Any]]:
             return [dict(r) for r in rows]
 
 
+async def get_exercise_sets_range(start: str, end: str) -> list[dict[str, Any]]:
+    """Devuelve series de ejercicios registradas dentro de un periodo."""
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT workout_id, date, exercise_name, set_number, weight_kg,
+                   is_bodyweight, added_weight_kg, reps, rpe
+            FROM workout_exercises
+            WHERE date BETWEEN ? AND ?
+            ORDER BY date, workout_id, exercise_name, set_number
+            """,
+            (start, end),
+        ) as cur:
+            rows = await cur.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def get_all_exercise_sets() -> list[dict[str, Any]]:
+    """Devuelve todas las series para calcular récords históricos."""
+    async with aiosqlite.connect(settings.database_path) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT workout_id, date, exercise_name, set_number, weight_kg,
+                   is_bodyweight, added_weight_kg, reps, rpe
+            FROM workout_exercises
+            ORDER BY date, workout_id, exercise_name, set_number
+            """
+        ) as cur:
+            rows = await cur.fetchall()
+            return [dict(row) for row in rows]
+
+
 async def get_previous_exercise_sets(exercise_name: str, current_workout_id: str | None = None) -> list[dict[str, Any]]:
     """
     Busca la sesión más reciente anterior donde se realizó este ejercicio

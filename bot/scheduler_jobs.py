@@ -36,6 +36,7 @@ async def _send(text: str) -> bool:
             chat_id=settings.telegram_chat_id,
             text=text,
             parse_mode="HTML",
+            disable_notification=False,
         )
         return True
     except Exception as exc:
@@ -246,6 +247,39 @@ async def job_database_backup() -> None:
         logger.exception("No se pudo crear la copia de seguridad")
 
 
+async def job_monthly_season() -> None:
+    """Envía el resumen de temporada el último día de cada mes."""
+    from bot.logic import get_season_summary
+
+    month_key = date.today().strftime("%Y-%m")
+    if await db.was_reminder_sent(month_key, "season"):
+        return
+
+    season = await get_season_summary(month_key)
+    if season["num_workouts"] == 0 and season["protein_days"] == 0:
+        return
+
+    star_line = (
+        f"🔥 Ejercicio estrella: <b>{season['star_exercise']}</b>"
+        if season["star_exercise"]
+        else "🔥 Ejercicio estrella: <i>Sin datos suficientes</i>"
+    )
+    message = "\n".join([
+        f"🏆 <b>Temporada de {season['month']}</b>",
+        f"Nivel <b>{season['level']}</b> · {season['xp']} XP",
+        f"💪 {season['num_workouts']} entrenamientos · {season['total_volume_kg']:,.0f} kg movidos".replace(",", "."),
+        f"🥩 {season['protein_days']} días cumpliendo proteína",
+        f"🏅 {season['personal_records']} récords personales",
+        star_line,
+        "",
+        "<i>Tu fuerza sube y tu constancia también.</i>",
+    ])
+    sent = await _send(message)
+    if sent:
+        await db.mark_reminder_sent(month_key, "season")
+        logger.info("Resumen de temporada enviado para %s", month_key)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuración del scheduler
 # ─────────────────────────────────────────────────────────────────────────────
@@ -289,8 +323,15 @@ def create_scheduler() -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    scheduler.add_job(
+        job_monthly_season,
+        trigger=CronTrigger(day="last", hour=21, minute=30),
+        id="monthly_season",
+        replace_existing=True,
+    )
+
     logger.info(
-        "Scheduler configurado: mañana %02d:%02d, noche %02d:%02d, backup %02d:%02d, semanal día %d a las 21:00",
+        "Scheduler configurado: mañana %02d:%02d, noche %02d:%02d, backup %02d:%02d, temporada último día 21:30, semanal día %d a las 21:00",
         morning_h, morning_m, night_h, night_m, backup_h, backup_m, weekly_day,
     )
     return scheduler

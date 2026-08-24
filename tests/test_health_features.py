@@ -7,11 +7,33 @@ from unittest.mock import AsyncMock, patch
 
 from bot.hevy_parser import format_hevy_summary, is_hevy_workout_text, parse_hevy_text
 from bot import db
-from bot.logic import compare_workout, get_protein_streak
+from bot.logic import compare_workout, get_protein_streak, get_season_summary
 from bot.webhook import normalize_payload_dict, parse_float
 
 
 class HealthFeatureTests(unittest.TestCase):
+    def test_hevy_parses_the_export_format_with_multiple_inline_sets(self):
+        parsed = parse_hevy_text(
+            "Pecho, Hombros y Tríceps lunes, ago 24, 2026 a las 9:56am\n"
+            "Press de Banca Inclinado (Mancuerna) Serie 1: 20 kg x 15 [Calentamiento] "
+            "Serie 2: 30 kg x 12 Serie 3: 35 kg x 12 Serie 4: 35 kg x 9 Serie 5: 35 kg x 8\n"
+            "Press de Banca (Mancuerna) Serie 1: 40 kg x 8\n"
+            "Aperturas (Máquina) Serie 1: 32 kg x 13 Serie 2: 32 kg x 13 Serie 3: 32 kg x 10\n"
+            "Press de Hombros (Mancuerna) Serie 1: 18 kg x 12 Serie 2: 18 kg x 10 Serie 3: 18 kg x 10\n"
+            "Elevacion Laterales (Mancuerna) Serie 1: 12 kg x 14 Serie 2: 12 kg x 12 Serie 3: 12 kg x 12\n"
+            "Extensión de tríceps en polea Serie 1: 18 kg x 15 Serie 2: 18 kg x 13 Serie 3: 18 kg x 10\n"
+            "Curl con Barra EZ Serie 1: 20 kg x 12 Serie 2: 20 kg x 12 Serie 3: 20 kg x 10"
+        )
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["workout_name"], "Pecho, Hombros y Tríceps")
+        self.assertEqual(parsed["date"], "2026-08-24")
+        self.assertEqual(parsed["total_sets"], 21)
+        self.assertEqual(parsed["exercises"][0]["name"], "Press de Banca Inclinado (Mancuerna)")
+        self.assertEqual(len(parsed["exercises"]), 7)
+        self.assertEqual(parsed["exercises"][0]["sets"][-1]["weight_kg"], 35.0)
+        self.assertEqual(parsed["total_volume_kg"], 5543.0)
+
     def test_hevy_parses_bodyweight_and_added_load(self):
         self.assertTrue(is_hevy_workout_text("Dominadas\nSet 1: BW x 8"))
         parsed = parse_hevy_text(
@@ -138,6 +160,37 @@ class HealthFeatureTests(unittest.TestCase):
             reminders, remaining = asyncio.run(run_persistence(database_path))
             self.assertEqual(reminders[0]["message"], "Beber agua")
             self.assertEqual(remaining, [])
+
+    def test_season_summary_calculates_real_monthly_metrics(self):
+        workouts = [{"id": "one"}, {"id": "two"}]
+        nutrition = [
+            {"date": "2026-08-01", "protein_g": 170},
+            {"date": "2026-08-02", "protein_g": 150},
+        ]
+        current_sets = [
+            {"date": "2026-08-01", "exercise_name": "Press banca", "weight_kg": 82.5, "reps": 5},
+            {"date": "2026-08-01", "exercise_name": "Remo", "weight_kg": 60.0, "reps": 12},
+        ]
+        all_sets = [
+            {"date": "2026-07-20", "exercise_name": "Press banca", "weight_kg": 80.0, "reps": 5},
+            *current_sets,
+        ]
+
+        async def run_summary():
+            logic_globals = get_season_summary.__globals__
+            with patch.object(logic_globals["db"], "get_workouts_range", new=AsyncMock(return_value=workouts)), \
+                 patch.object(logic_globals["db"], "get_nutrition_range", new=AsyncMock(return_value=nutrition)), \
+                 patch.object(logic_globals["db"], "get_exercise_sets_range", new=AsyncMock(return_value=current_sets)), \
+                 patch.object(logic_globals["db"], "get_all_exercise_sets", new=AsyncMock(return_value=all_sets)), \
+                 patch.object(logic_globals["db"], "get_targets", new=AsyncMock(return_value={"protein_target_g": 160})):
+                return await get_season_summary("2026-08")
+
+        result = asyncio.run(run_summary())
+        self.assertEqual(result["num_workouts"], 2)
+        self.assertEqual(result["protein_days"], 1)
+        self.assertEqual(result["total_volume_kg"], 1132.5)
+        self.assertEqual(result["personal_records"], 1)
+        self.assertEqual(result["star_exercise"], "Remo")
 
 
 if __name__ == "__main__":

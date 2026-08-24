@@ -198,6 +198,7 @@ async def _send_telegram(text: str) -> None:
             chat_id=settings.telegram_chat_id,
             text=text,
             parse_mode="HTML",
+            disable_notification=False,
         )
     except Exception as exc:
         logger.error("Error enviando mensaje de Telegram: %s", exc)

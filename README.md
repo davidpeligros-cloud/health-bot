@@ -31,6 +31,7 @@ Bot personal de Telegram y servidor FastAPI para seguimiento de recomposición c
 | `/racha` | Muestra tu racha actual y récord de días consecutivos cumpliendo la proteína |
 | `/hoy` | Resumen del día (calorías, proteína, carbos, grasas, peso, racha) |
 | `/semana` | Informe semanal de adherencia, peso medio, tendencia y entrenos |
+| `/temporada` | Resumen mensual con nivel, XP, récords y ejercicio estrella |
 | `/entreno` | Último entreno registrado con FC Polar H10, detalle de series y comparativa |
 | `/hevy` | Ayuda e importación manual de rutinas de Hevy |
 | `/objetivo` | Ver o ajustar objetivos (`/objetivo cal 1800 prot 160`) |
@@ -82,6 +83,8 @@ La base de datos se copia automáticamente cada día a `data/backups` a las 03:3
 (hora de Madrid) y se conservan las últimas 14 copias. Puedes crear una copia
 manual con `/backup`. El horario, directorio y retención se pueden cambiar con
 `BACKUP_TIME`, `BACKUP_DIR` y `BACKUP_RETENTION_DAYS` en `.env`.
+
+El bot envía automáticamente la temporada el último día de cada mes a las 21:30.
 
 ---
 

@@ -193,6 +193,35 @@ async def cmd_semana(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_html("\n".join(lines))
 
 
+async def cmd_temporada(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra la temporada mensual actual o el mes YYYY-MM solicitado."""
+    month = context.args[0] if context.args else None
+    try:
+        season = await logic.get_season_summary(month)
+    except ValueError:
+        await update.message.reply_text("⚠️ Usa el formato `/temporada 2026-08` para consultar un mes concreto.")
+        return
+
+    records = season["personal_records"]
+    record_line = f"🏅 {records} récord{'s' if records != 1 else ''} personal{'es' if records != 1 else ''}"
+    star_line = (
+        f"🔥 Ejercicio estrella: <b>{season['star_exercise']}</b>"
+        if season["star_exercise"]
+        else "🔥 Ejercicio estrella: <i>Aún no hay series registradas</i>"
+    )
+    lines = [
+        f"🏆 <b>Temporada de {season['month']}</b>",
+        f"Nivel <b>{season['level']}</b> · {season['xp']} XP",
+        f"💪 {season['num_workouts']} entrenamientos · {season['total_volume_kg']:,.0f} kg movidos".replace(",", "."),
+        f"🥩 {season['protein_days']} días cumpliendo proteína",
+        record_line,
+        star_line,
+        "",
+        "<i>Tu fuerza sube y tu constancia también.</i>",
+    ]
+    await update.message.reply_html("\n".join(lines))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # /objetivo
 # ─────────────────────────────────────────────────────────────────────────────
@@ -501,6 +530,7 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("racha", cmd_racha))
     application.add_handler(CommandHandler("hoy", cmd_hoy))
     application.add_handler(CommandHandler("semana", cmd_semana))
+    application.add_handler(CommandHandler("temporada", cmd_temporada))
     application.add_handler(CommandHandler("objetivo", cmd_objetivo))
     application.add_handler(CommandHandler("entreno", cmd_entreno))
     application.add_handler(CommandHandler("hevy", cmd_hevy))

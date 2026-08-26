@@ -481,6 +481,76 @@ async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# /musculos (Mapa muscular y análisis de ejercicios)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_musculos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra qué grupos musculares trabajas y su frecuencia."""
+    exercises = await db.get_all_exercise_sets()
+    if not exercises:
+        await update.message.reply_text("💪 No hay entrenamientos registrados todavía.")
+        return
+    
+    exercise_names = list(set(e.get("exercise_name") for e in exercises if e.get("exercise_name")))
+    insights = await logic.get_exercise_library_insights(exercise_names)
+    
+    lines = [
+        "💪 <b>Análisis de Grupos Musculares</b>",
+        f"Ejercicios únicos: <b>{insights['ejercicios_analizados']}</b>",
+        f"Grupos trabajados: <b>{insights['grupos_musculares_únicos']}</b>",
+        "",
+        "<b>Frecuencia por grupo:</b>",
+    ]
+    
+    for group_label, count in insights["frecuencia_por_grupo"].items():
+        bar = "▓" * min(count, 10) + "░" * max(0, 10 - count)
+        lines.append(f"{group_label}: {bar} ({count})")
+    
+    if insights["más_trabajado"]:
+        lines.append(f"\n⭐ Más trabajado: {insights['más_trabajado']}")
+    if insights["menos_trabajado"]:
+        lines.append(f"⚠️ Menos trabajado: {insights['menos_trabajado']}")
+    
+    await update.message.reply_html("\n".join(lines))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /fatiga (Mapa de recuperación muscular)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_fatiga(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra el estado de fatiga/recuperación de cada grupo muscular."""
+    days = 7
+    if context.args and context.args[0].isdigit():
+        days = int(context.args[0])
+    
+    fatigue_map = await logic.get_muscle_fatigue_map(days=days)
+    
+    if not fatigue_map.get("has_data"):
+        await update.message.reply_text(f"💪 {fatigue_map.get('message', 'Sin datos')}")
+        return
+    
+    lines = [
+        f"🏋️ <b>Mapa de Fatiga/Recuperación (últimos {days} días)</b>",
+        f"Período: {fatigue_map['period']}",
+        "",
+        "<b>Estado por grupo muscular:</b>",
+    ]
+    
+    for muscle, data in fatigue_map.get("muscles", {}).items():
+        lines.append(
+            f"{data['emoji']} {muscle.capitalize()}: "
+            f"{data['status_emoji']} <b>{data['status']}</b> "
+            f"({data['horas_desde']}h) · "
+            f"<i>{data['sets']} series, {data['volumen_kg']:.0f} kg</i>"
+        )
+    
+    await update.message.reply_html("\n".join(lines))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Chat libre con IA & Detección de Hevy
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -538,7 +608,8 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("recuerdame", cmd_recuerdame))
     application.add_handler(CommandHandler("olvidar", cmd_olvidar))
     application.add_handler(CommandHandler("backup", cmd_backup))
-
+    application.add_handler(CommandHandler("musculos", cmd_musculos))
+    application.add_handler(CommandHandler("fatiga", cmd_fatiga))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_message))
 
     logger.info("Handlers de Telegram registrados (con /racha, Hevy parser y Polar H10).")

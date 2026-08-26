@@ -192,6 +192,98 @@ class HealthFeatureTests(unittest.TestCase):
         self.assertEqual(result["personal_records"], 1)
         self.assertEqual(result["star_exercise"], "Remo")
 
+    def test_muscle_groups_maps_exercises_correctly(self):
+        from bot.muscle_groups import get_muscle_groups_for_exercise
+        
+        # Test exact matches
+        self.assertEqual(set(get_muscle_groups_for_exercise("Press de Banca")), {"pecho", "hombros", "brazos"})
+        self.assertEqual(set(get_muscle_groups_for_exercise("Remo")), {"espalda", "brazos"})
+        self.assertEqual(set(get_muscle_groups_for_exercise("Peso Muerto")), {"espalda", "glúteos", "isquiotibiales", "core"})
+        
+        # Test case insensitivity
+        self.assertEqual(set(get_muscle_groups_for_exercise("press de banca")), {"pecho", "hombros", "brazos"})
+        self.assertEqual(set(get_muscle_groups_for_exercise("PRESS DE BANCA")), {"pecho", "hombros", "brazos"})
+        
+        # Test partial match fallback
+        muscles = get_muscle_groups_for_exercise("Curl barra")
+        self.assertIn("brazos", muscles)
+        
+        # Test unknown exercise defaults to core
+        unknown_muscles = get_muscle_groups_for_exercise("Ejercicio desconocido")
+        self.assertEqual(unknown_muscles, ["core"])
+
+    def test_muscle_fatigue_aggregation(self):
+        from bot.muscle_groups import aggregate_muscle_fatigue
+        
+        sets = [
+            {"exercise_name": "Press de Banca", "weight_kg": 80.0, "reps": 10, "date": "2026-08-24"},
+            {"exercise_name": "Press de Banca", "weight_kg": 80.0, "reps": 8, "date": "2026-08-24"},
+            {"exercise_name": "Remo", "weight_kg": 60.0, "reps": 12, "date": "2026-08-24"},
+        ]
+        
+        fatigue = aggregate_muscle_fatigue(sets, "2026-08-24")
+        
+        # Pecho worked 2 sets with volume 80*10 + 80*8 = 1440
+        self.assertEqual(fatigue["pecho"]["sets"], 2)
+        self.assertEqual(fatigue["pecho"]["volumen_kg"], 1440.0)
+        self.assertEqual(fatigue["pecho"]["reps"], 18)
+        
+        # Espalda worked 1 set with volume 60*12 = 720
+        self.assertEqual(fatigue["espalda"]["sets"], 1)
+        self.assertEqual(fatigue["espalda"]["volumen_kg"], 720.0)
+
+    def test_recovery_status_determination(self):
+        from bot.muscle_groups import recovery_status
+        
+        # Very fatigued (< 24 hrs)
+        emoji, status = recovery_status(12.0)
+        self.assertEqual(emoji, "🔴")
+        self.assertIn("Muy", status)
+        
+        # Fatigued (24-48 hrs)
+        emoji, status = recovery_status(36.0)
+        self.assertEqual(emoji, "🟠")
+        self.assertIn("Fatigado", status)
+        
+        # Recovering (48-72 hrs)
+        emoji, status = recovery_status(60.0)
+        self.assertEqual(emoji, "🟡")
+        self.assertIn("recuperación", status)
+        
+        # Recovered (72+ hrs)
+        emoji, status = recovery_status(96.0)
+        self.assertEqual(emoji, "🟢")
+        self.assertIn("Recuperado", status)
+
+    def test_muscle_fatigue_map_async(self):
+        from bot.logic import get_muscle_fatigue_map
+        
+        async def run_fatigue():
+            sets = [
+                {"exercise_name": "Press de Banca", "weight_kg": 80.0, "reps": 10, "date": "2026-08-24"},
+                {"exercise_name": "Remo", "weight_kg": 60.0, "reps": 12, "date": "2026-08-23"},
+            ]
+            logic_globals = get_muscle_fatigue_map.__globals__
+            with patch.object(logic_globals["db"], "get_exercise_sets_range", new=AsyncMock(return_value=sets)):
+                return await get_muscle_fatigue_map(days=7)
+        
+        result = asyncio.run(run_fatigue())
+        self.assertTrue(result["has_data"])
+        self.assertIn("muscles", result)
+        self.assertTrue(len(result["muscles"]) > 0)
+
+    def test_exercise_library_insights(self):
+        from bot.logic import get_exercise_library_insights
+        
+        async def run_insights():
+            exercises = ["Press de Banca", "Press de Banca", "Remo", "Curl barra"]
+            return await get_exercise_library_insights(exercises)
+        
+        result = asyncio.run(run_insights())
+        self.assertEqual(result["ejercicios_analizados"], 4)
+        # Las claves tienen formato "emoji grupo" (e.g., "💪 brazos")
+        self.assertTrue(any("pecho" in k for k in result["frecuencia_por_grupo"] or {}))
+
 
 if __name__ == "__main__":
     unittest.main()

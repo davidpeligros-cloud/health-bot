@@ -489,3 +489,99 @@ async def build_ai_context(days: int = 7) -> dict[str, Any]:
         ],
         "weight_last_7_days": weight_rows,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Análisis de Fatiga y Recuperación Muscular (openGym integration)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def get_muscle_fatigue_map(days: int = 7) -> dict[str, Any]:
+    """
+    Analiza la fatiga muscular basada en los entrenamientos de los últimos N días.
+    Devuelve un mapa de grupos musculares con su estado de recuperación.
+    """
+    from bot.muscle_groups import (
+        aggregate_muscle_fatigue, recovery_status, MUSCLE_GROUP_ORDER, MUSCLE_GROUP_EMOJIS
+    )
+    
+    end = _today()
+    start = _n_days_ago(days - 1)
+    
+    # Obtener todas las series del periodo
+    all_sets = await db.get_exercise_sets_range(start, end)
+    if not all_sets:
+        return {
+            "has_data": False,
+            "message": "No hay entrenamientos registrados en los últimos 7 días."
+        }
+    
+    # Agregar fatiga por grupo muscular
+    fatigue_map = aggregate_muscle_fatigue(all_sets, end)
+    
+    # Enriquecer con estado de recuperación
+    result = {
+        "has_data": True,
+        "period": f"{start} → {end}",
+        "muscles": {},
+        "summary": []
+    }
+    
+    for muscle in MUSCLE_GROUP_ORDER:
+        data = fatigue_map[muscle]
+        if data["sets"] == 0:
+            continue
+        
+        last_workout = data["último_entreno"]
+        hours_since = (
+            0 if not last_workout else 
+            round((datetime.fromisoformat(end) - datetime.fromisoformat(last_workout)).total_seconds() / 3600)
+        )
+        emoji, status = recovery_status(hours_since)
+        
+        result["muscles"][muscle] = {
+            "emoji": MUSCLE_GROUP_EMOJIS.get(muscle, "❓"),
+            "sets": data["sets"],
+            "volumen_kg": round(data["volumen_kg"], 1),
+            "reps": data["reps"],
+            "último_entreno": last_workout,
+            "horas_desde": hours_since,
+            "status_emoji": emoji,
+            "status": status,
+        }
+        result["summary"].append(f"{MUSCLE_GROUP_EMOJIS.get(muscle)} {muscle}: {status} ({hours_since}h)")
+    
+    return result
+
+
+async def get_exercise_library_insights(user_exercises: list[str]) -> dict[str, Any]:
+    """
+    Analiza los ejercicios del usuario y devuelve insights sobre qué grupos musculares trabaja.
+    Útil para recomendar ejercicios complementarios o detectar desbalances.
+    """
+    from bot.muscle_groups import get_muscle_groups_for_exercise, MUSCLE_GROUP_EMOJIS
+    
+    muscle_count: dict[str, int] = {}
+    exercise_detail = {}
+    
+    for exercise_name in user_exercises:
+        muscles = get_muscle_groups_for_exercise(exercise_name)
+        exercise_detail[exercise_name] = muscles
+        for muscle in muscles:
+            muscle_count[muscle] = muscle_count.get(muscle, 0) + 1
+    
+    # Detectar desbalances
+    most_worked = max(muscle_count, key=muscle_count.get) if muscle_count else None
+    least_worked = min(muscle_count, key=muscle_count.get) if muscle_count else None
+    
+    return {
+        "ejercicios_analizados": len(user_exercises),
+        "grupos_musculares_únicos": len(muscle_count),
+        "frecuencia_por_grupo": {
+            f"{MUSCLE_GROUP_EMOJIS.get(m, '?')} {m}": count
+            for m, count in sorted(muscle_count.items(), key=lambda x: -x[1])
+        },
+        "más_trabajado": f"{MUSCLE_GROUP_EMOJIS.get(most_worked, '?')} {most_worked}" if most_worked else None,
+        "menos_trabajado": f"{MUSCLE_GROUP_EMOJIS.get(least_worked, '?')} {least_worked}" if least_worked else None,
+        "detalle": exercise_detail,
+    }

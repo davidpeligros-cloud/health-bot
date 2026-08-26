@@ -39,6 +39,8 @@ Bot personal de Telegram y servidor FastAPI para seguimiento de recomposición c
 | `/recuerdame` | Programar recordatorios (`/recuerdame 10:00 Tomar creatina`) |
 | `/olvidar` | Limpiar la memoria del chat con la IA |
 | `/backup` | Crear una copia manual de la base de datos |
+| `/musculos` | Análisis de grupos musculares trabajados (frecuencia y desbalances) |
+| `/fatiga` | Mapa visual de fatiga/recuperación muscular (últimos 7 días, o especificar: `/fatiga 14`) |
 | *Chat libre* | Escribe cualquier duda o pega un entreno de Hevy directamente |
 
 ---

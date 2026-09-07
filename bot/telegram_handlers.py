@@ -1,9 +1,10 @@
-﻿"""
+"""
 telegram_handlers.py — Handlers async para todos los comandos y mensajes de Telegram.
-Incluye soporte para /racha, parseo automático de Hevy con progresión, Polar H10 y chat IA.
+Incluye soporte para /racha, /volumen, /records, /quecomo, /grafica, Hevy con PRs, Polar H10 y chat IA.
 """
 from __future__ import annotations
 
+import io
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -13,6 +14,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 
 from bot import db, logic
 from bot.ai_advice import get_advice
+from bot.charts import generate_progress_chart
 from bot.hevy_parser import is_hevy_workout_text, parse_hevy_text, format_hevy_summary
 from bot.scheduler_jobs import schedule_custom_reminder
 
@@ -39,6 +41,33 @@ def _sign(v: float) -> str:
 def _fmt_diff(value: float, unit: str = "") -> str:
     sign = "+" if value >= 0 else ""
     return f"{sign}{value:.1f}{unit}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /start y /ayuda
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mensaje de bienvenida y guía completa del bot."""
+    msg = (
+        "👋 <b>¡Bienvenido a tu Entrenador y Nutricionista Personal!</b>\n\n"
+        "Este bot analiza automáticamente tus datos de salud (Apple Health, Yazio, Hevy, Polar H10) "
+        "para ayudarte en tu recomposición corporal (perder grasa y maximizar masa muscular).\n\n"
+        "📋 <b>Comandos principales:</b>\n"
+        "• /hoy — Resumen de calorías, proteína y racha de hoy\n"
+        "• /racha — Tu racha de días cumpliendo proteína\n"
+        "• /volumen — Series semanales por grupo muscular\n"
+        "• /records — Récords personales y 1RM estimado (Epley)\n"
+        "• /grafica — Gráfico visual de peso y adherencia\n"
+        "• /quecomo — 3 sugerencias de comidas adaptadas a tus macros\n"
+        "• /semana — Informe semanal de consistencia y peso\n"
+        "• /entreno — Último entreno registrado con FC Polar H10\n"
+        "• /objetivo — Ver o editar tus metas (/objetivo cal 1800 prot 135)\n"
+        "• /consejo — Pide consejo o escribe cualquier duda al chat\n\n"
+        "🏋️‍♂️ <i>Truco: Puedes pegar directamente un entrenamiento de Hevy en este chat para analizarlo al instante con PRs y progresión.</i>"
+    )
+    await update.message.reply_html(msg)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -193,32 +222,137 @@ async def cmd_semana(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_html("\n".join(lines))
 
 
-async def cmd_temporada(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Muestra la temporada mensual actual o el mes YYYY-MM solicitado."""
-    month = context.args[0] if context.args else None
-    try:
-        season = await logic.get_season_summary(month)
-    except ValueError:
-        await update.message.reply_text("⚠️ Usa el formato `/temporada 2026-08` para consultar un mes concreto.")
+# ─────────────────────────────────────────────────────────────────────────────
+# /volumen (Series semanales por grupo muscular)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_volumen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra el volumen de series semanales por grupo muscular vs referencias óptimas."""
+    vol_data = await logic.get_weekly_muscle_volume(days=7)
+
+    lines = [
+        f"📊 <b>Volumen Semanal por Grupo Muscular</b>",
+        f"🗓 Periodo: {vol_data['period_start']} → {vol_data['period_end']}",
+        f"🏋️‍♂️ Total series: <b>{vol_data['total_sets']}</b> | Volumen: <b>{vol_data['total_volume_kg']:,.0f} kg</b>\n".replace(",", "."),
+    ]
+
+    for g in vol_data["groups"]:
+        lines.append(f"{g['emoji']} <b>{g['muscle']}</b>: {g['status_emoji']} {g['status_text']}")
+
+    lines.append("\n💡 <i>Referencia científica (Schoenfeld et al.): 10-20 series semanales por músculo maximizan la hipertrofia.</i>")
+    await update.message.reply_html("\n".join(lines))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /records o /prs (Mejores marcas personales históricas)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_records(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra las mejores marcas y 1RM estimado por ejercicio."""
+    prs = await logic.get_all_personal_records()
+
+    if not prs:
+        await update.message.reply_text("🏆 Aún no hay ejercicios registrados en la base de datos para calcular récords.")
         return
 
-    records = season["personal_records"]
-    record_line = f"🏅 {records} récord{'s' if records != 1 else ''} personal{'es' if records != 1 else ''}"
-    star_line = (
-        f"🔥 Ejercicio estrella: <b>{season['star_exercise']}</b>"
-        if season["star_exercise"]
-        else "🔥 Ejercicio estrella: <i>Aún no hay series registradas</i>"
+    lines = ["🏆 <b>Récords Personales (1RM Estimado - Epley)</b>\n"]
+    current_group = None
+
+    for pr in prs:
+        if pr["muscle_group"] != current_group:
+            current_group = pr["muscle_group"]
+            lines.append(f"\n📂 <b>{current_group}</b>")
+
+        w_str = f"{pr['best_weight']:.1f}".rstrip("0").rstrip(".")
+        lines.append(
+            f"  • <b>{pr['exercise_name']}</b>: {w_str} kg × {pr['best_reps']} reps "
+            f"(1RM est: <b>{pr['e1rm']:.1f} kg</b>)"
+        )
+
+    await update.message.reply_html("\n".join(lines))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /quecomo o /cena (Sugerencias inteligentes de comida)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_quecomo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Genera 3 opciones de comida adaptadas a los macros restantes de hoy."""
+    meal_type = " ".join(context.args) if context.args else "cena"
+    wait_msg = await update.message.reply_text("🍳 Analizando tus macros restantes y buscando 3 opciones ideales… un momento.")
+
+    suggestions = await logic.get_meal_suggestions(meal_type=meal_type)
+    await context.bot.edit_message_text(
+        chat_id=update.effective_chat.id,
+        message_id=wait_msg.message_id,
+        text=suggestions,
+        parse_mode="HTML",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /grafica o /progreso (Gráficos visuales con Matplotlib)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_grafica(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Genera y envía una imagen gráfica con la evolución de peso y adherencia nutricional."""
+    days = 21
+    if context.args and context.args[0].isdigit():
+        days = int(context.args[0])
+
+    wait_msg = await update.message.reply_text("📈 Generando gráfico de evolución… un momento.")
+
+    chart_bytes = await generate_progress_chart(days=days)
+    if not chart_bytes:
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=wait_msg.message_id,
+            text="⚠️ No hay suficientes datos de peso o nutrición para generar el gráfico.",
+        )
+        return
+
+    # Eliminar mensaje de espera y enviar la foto
+    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=wait_msg.message_id)
+    await context.bot.send_photo(
+        chat_id=update.effective_chat.id,
+        photo=io.BytesIO(chart_bytes),
+        caption=f"📈 <b>Evolución de los últimos {days} días</b> (Peso con media móvil y balance nutricional)",
+        parse_mode="HTML",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /temporada
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def cmd_temporada(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Muestra el progreso mensual gamificado con nivel y XP."""
+    requested_month = context.args[0] if context.args else None
+    try:
+        data = await logic.get_season_summary(requested_month)
+    except ValueError:
+        await update.message.reply_text("⚠️ Formato de mes inválido. Usa YYYY-MM (ej. 2026-08)")
+        return
+
+    month_name = datetime.strptime(data["month"], "%Y-%m").strftime("%B %Y").capitalize()
+    star_line = f"⭐ Ejercicio estrella: <b>{data['star_exercise']}</b>" if data["star_exercise"] else "⭐ Ejercicio estrella: <i>sin datos</i>"
     lines = [
-        f"🏆 <b>Temporada de {season['month']}</b>",
-        f"Nivel <b>{season['level']}</b> · {season['xp']} XP",
-        f"💪 {season['num_workouts']} entrenamientos · {season['total_volume_kg']:,.0f} kg movidos".replace(",", "."),
-        f"🥩 {season['protein_days']} días cumpliendo proteína",
-        record_line,
-        star_line,
+        f"🏆 <b>Temporada {month_name}</b>",
+        f"🏅 Nivel: <b>{data['level']}</b> ({data['xp']} XP)",
         "",
-        "<i>Tu fuerza sube y tu constancia también.</i>",
+        f"💪 Entrenos completados: <b>{data['num_workouts']}</b>",
+        f"📦 Volumen total: <b>{data['total_volume_kg']:,.0f} kg</b>".replace(",", "."),
+        f"🥩 Días cumpliendo proteína: <b>{data['protein_days']}</b>",
+        f"🔥 Récords superados: <b>{data['personal_records']}</b>",
+        star_line,
     ]
+    if data["personal_record_names"]:
+        lines.append("   • " + ", ".join(data["personal_record_names"]))
     await update.message.reply_html("\n".join(lines))
 
 
@@ -246,7 +380,7 @@ async def cmd_objetivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             msg += f"🫒 Grasa: <b>{targets['fat_target_g']:.0f} g</b>\n"
         if targets.get("tdee_estimate"):
             msg += f"📊 TDEE estimado: <b>{targets['tdee_estimate']:.0f} kcal</b>\n"
-        msg += "\n<i>Para editar: /objetivo cal 1700 prot 160 carbs 180 gras 55</i>"
+        msg += "\n<i>Para editar: /objetivo cal 1800 prot 135 carbs 180 gras 55</i>"
         await update.message.reply_html(msg)
         return
 
@@ -276,7 +410,7 @@ async def cmd_objetivo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     if not updates:
         await update.message.reply_text(
-            "⚠️ No entendí los argumentos.\nUso: /objetivo cal 1700 prot 160 carbs 180 gras 55"
+            "⚠️ No entendí los argumentos.\nUso: /objetivo cal 1800 prot 135 carbs 180 gras 55"
         )
         return
 
@@ -318,11 +452,7 @@ async def cmd_entreno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             hr_parts.append(f"<b>{last['avg_hr_bpm']:.0f} bpm</b> media")
         if last.get("max_hr_bpm"):
             hr_parts.append(f"<b>{last['max_hr_bpm']:.0f} bpm</b> máx")
-        source = last.get("source") or "fuente no especificada"
-        source_label = "Polar H10" if any(
-            marker in source.lower() for marker in ("polar", "h10")
-        ) else source
-        lines.append(f"❤️ FC: {' | '.join(hr_parts)} <i>({source_label})</i>")
+        lines.append(f"❤️ FC: {' | '.join(hr_parts)} <i>(Polar H10)</i>")
 
     # Cargar series si están registradas
     exercises = await db.get_workout_exercises(last["id"])
@@ -335,12 +465,7 @@ async def cmd_entreno(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 lines.append(f"🔹 <b>{current_ex}</b>")
             w_str = f"{s['weight_kg']:.1f}".rstrip("0").rstrip(".") if s.get("weight_kg") is not None else "0"
             rpe_txt = f" @ RPE {s['rpe']}" if s.get("rpe") else ""
-            if s.get("is_bodyweight"):
-                added = s.get("added_weight_kg") or 0.0
-                load_text = f"peso corporal{f' +{added:g} kg' if added else ''}"
-            else:
-                load_text = f"{w_str} kg"
-            lines.append(f"   • Serie {s['set_number']}: {load_text} × {s['reps']} reps{rpe_txt}")
+            lines.append(f"   • Serie {s['set_number']}: {w_str} kg × {s['reps']} reps{rpe_txt}")
 
     if last.get("name"):
         comparison = await logic.compare_workout(last["id"], last["name"])
@@ -374,7 +499,7 @@ async def cmd_hevy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_html(
             "🏋️‍♂️ <b>Registro de Hevy:</b>\n\n"
             "Puedes pegar directamente el texto exportado de tu rutina de Hevy en este chat (sin necesidad de escribir /hevy).\n"
-            "El bot detectará automáticamente los ejercicios, series, pesos, reps y calculará tu progresión contra la sesión anterior."
+            "El bot detectará automáticamente los ejercicios, series, pesos, reps, PRs y calculará tu progresión contra la sesión anterior."
         )
         return
 
@@ -396,10 +521,11 @@ async def _process_and_reply_hevy(update: Update, text: str) -> None:
         raw=parsed,
     )
 
+    prs = await logic.detect_workout_prs(workout_id, parsed["exercises"])
     progression = await logic.compare_exercise_progression(workout_id, parsed["exercises"])
     await db.save_workout_exercises(workout_id, parsed["date"], parsed["exercises"])
 
-    summary_html = format_hevy_summary(parsed, progression)
+    summary_html = format_hevy_summary(parsed, progression, prs=prs)
     await update.message.reply_html(summary_html)
 
     # Registrar en memoria para que el asistente IA lo sepa
@@ -465,91 +591,6 @@ async def cmd_olvidar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text("🧹 Memoria de la conversación borrada correctamente.")
 
 
-async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Crea una copia manual de la base de datos y conserva las últimas copias."""
-    try:
-        backup_path = await db.backup_database()
-    except Exception:
-        logger.exception("No se pudo crear una copia manual desde Telegram")
-        await update.message.reply_text("❌ No se pudo crear la copia de seguridad.")
-        return
-
-    await update.message.reply_text(
-        f"✅ Copia de seguridad creada: {backup_path.name}\n"
-        f"Se conservan las últimas {db.settings.backup_retention_days} copias."
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# /musculos (Mapa muscular y análisis de ejercicios)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-async def cmd_musculos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Muestra qué grupos musculares trabajas y su frecuencia."""
-    exercises = await db.get_all_exercise_sets()
-    if not exercises:
-        await update.message.reply_text("💪 No hay entrenamientos registrados todavía.")
-        return
-    
-    exercise_names = list(set(e.get("exercise_name") for e in exercises if e.get("exercise_name")))
-    insights = await logic.get_exercise_library_insights(exercise_names)
-    
-    lines = [
-        "💪 <b>Análisis de Grupos Musculares</b>",
-        f"Ejercicios únicos: <b>{insights['ejercicios_analizados']}</b>",
-        f"Grupos trabajados: <b>{insights['grupos_musculares_únicos']}</b>",
-        "",
-        "<b>Frecuencia por grupo:</b>",
-    ]
-    
-    for group_label, count in insights["frecuencia_por_grupo"].items():
-        bar = "▓" * min(count, 10) + "░" * max(0, 10 - count)
-        lines.append(f"{group_label}: {bar} ({count})")
-    
-    if insights["más_trabajado"]:
-        lines.append(f"\n⭐ Más trabajado: {insights['más_trabajado']}")
-    if insights["menos_trabajado"]:
-        lines.append(f"⚠️ Menos trabajado: {insights['menos_trabajado']}")
-    
-    await update.message.reply_html("\n".join(lines))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# /fatiga (Mapa de recuperación muscular)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-async def cmd_fatiga(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Muestra el estado de fatiga/recuperación de cada grupo muscular."""
-    days = 7
-    if context.args and context.args[0].isdigit():
-        days = int(context.args[0])
-    
-    fatigue_map = await logic.get_muscle_fatigue_map(days=days)
-    
-    if not fatigue_map.get("has_data"):
-        await update.message.reply_text(f"💪 {fatigue_map.get('message', 'Sin datos')}")
-        return
-    
-    lines = [
-        f"🏋️ <b>Mapa de Fatiga/Recuperación (últimos {days} días)</b>",
-        f"Período: {fatigue_map['period']}",
-        "",
-        "<b>Estado por grupo muscular:</b>",
-    ]
-    
-    for muscle, data in fatigue_map.get("muscles", {}).items():
-        lines.append(
-            f"{data['emoji']} {muscle.capitalize()}: "
-            f"{data['status_emoji']} <b>{data['status']}</b> "
-            f"({data['horas_desde']}h) · "
-            f"<i>{data['sets']} series, {data['volumen_kg']:.0f} kg</i>"
-        )
-    
-    await update.message.reply_html("\n".join(lines))
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Chat libre con IA & Detección de Hevy
 # ─────────────────────────────────────────────────────────────────────────────
@@ -594,12 +635,22 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manejo centralizado de errores para evitar caídas silenciosas."""
+    logger.error("Excepción manejando actualización %s: %s", update, context.error, exc_info=context.error)
+
+
 def register_handlers(application: Application) -> None:
     """Registra todos los handlers en la aplicación del bot."""
+    application.add_handler(CommandHandler(["start", "ayuda", "help"], cmd_start))
     application.add_handler(CommandHandler("ping", cmd_ping))
     application.add_handler(CommandHandler("racha", cmd_racha))
     application.add_handler(CommandHandler("hoy", cmd_hoy))
     application.add_handler(CommandHandler("semana", cmd_semana))
+    application.add_handler(CommandHandler("volumen", cmd_volumen))
+    application.add_handler(CommandHandler(["records", "prs", "record"], cmd_records))
+    application.add_handler(CommandHandler(["quecomo", "cena", "comida"], cmd_quecomo))
+    application.add_handler(CommandHandler(["grafica", "progreso", "grafico"], cmd_grafica))
     application.add_handler(CommandHandler("temporada", cmd_temporada))
     application.add_handler(CommandHandler("objetivo", cmd_objetivo))
     application.add_handler(CommandHandler("entreno", cmd_entreno))
@@ -607,9 +658,8 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("consejo", cmd_consejo))
     application.add_handler(CommandHandler("recuerdame", cmd_recuerdame))
     application.add_handler(CommandHandler("olvidar", cmd_olvidar))
-    application.add_handler(CommandHandler("backup", cmd_backup))
-    application.add_handler(CommandHandler("musculos", cmd_musculos))
-    application.add_handler(CommandHandler("fatiga", cmd_fatiga))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_message))
 
-    logger.info("Handlers de Telegram registrados (con /racha, Hevy parser y Polar H10).")
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_message))
+    application.add_error_handler(error_handler)
+
+    logger.info("Handlers de Telegram registrados (con /start, /racha, /volumen, /records, /quecomo, /grafica y Hevy PRs).")

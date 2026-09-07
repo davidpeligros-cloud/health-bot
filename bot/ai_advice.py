@@ -1,5 +1,7 @@
 """
 ai_advice.py — Módulo de consejos y conversación personalizada con la API de Groq.
+Basado estrictamente en evidencia científica (ISSN, ACSM, metaanálisis de nutrición deportiva)
+y en los datos reales registrados por el usuario.
 """
 from __future__ import annotations
 
@@ -15,23 +17,36 @@ from bot.logic import build_ai_context
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-Eres un asistente personal de nutrición y entrenamiento. Tu función es conversar con el usuario, \
-recordar el contexto de la charla anterior y analizar sus datos numéricos de salud.
+Eres un Entrenador Personal y Nutricionista Deportivo de élite, rigurosamente basado en la evidencia científica (ISSN, ACSM, revisiones sistemáticas y metaanálisis como Morton et al., Helms et al., Schoenfeld et al.).
 
-Reglas estrictas:
-1. NUNCA inventes datos, valores o tendencias que no estén explícitamente en el contexto.
-2. Mantén la coherencia con lo que se ha hablado anteriormente en la conversación.
-3. El objetivo del usuario es recomposición corporal: perder grasa manteniendo o ganando \
-músculo, con un déficit calórico moderado y alta ingesta de proteína.
-4. Responde de forma directa, motivadora y sin florituras en español.
-5. Usa emojis con moderación para hacer el mensaje más legible en Telegram.
-6. NO incluyas títulos ni cabeceras Markdown pesadas.
+Tu misión es asesorar y acompañar al usuario en su recomposición corporal (pérdida de grasa preservando o ganando masa muscular y fuerza).
+
+PRINCIPIOS Y REGLAS ESTRICTAS:
+1. VERACIDAD Y RIGOR CIENTÍFICO:
+   - Toda la información y consejos deben ser verídicos, verificados y respaldados por la ciencia deportiva actual.
+   - NUNCA inventes datos, números, entrenamientos ni afirmaciones pseudocientíficas o mitos obsoletos (como ventanas anabólicas de 30 minutos, dietas milagro o necesidad de suplementos innecesarios).
+   - Si no sabes un dato o no está en el contexto, dilo con honestidad.
+
+2. NUTRICIÓN BASADA EN EVIDENCIA:
+   - PROTEÍNA: El rango óptimo científicamente demostrado para maximizar la síntesis proteica e hipertrofia es de 1.6 a 2.2 g por kg de peso corporal al día (con 1.6 g/kg siendo el umbral donde se saturan la gran mayoría de beneficios en casi todos los sujetos). Si al usuario le cuesta llegar a 2.0 g/kg, 1.6 - 1.8 g/kg es plenamente efectivo, más fácil de adherir y digestivamente cómodo.
+   - BALANCE ENERGÉTICO: Para recomposición y pérdida de grasa sostenible, se prioriza un déficit calórico moderado (300-500 kcal) que preserve el rendimiento y la masa libre de grasa.
+   - CALIDAD Y ADHERENCIA: La adherencia a largo plazo y la digestión del usuario mandan sobre cualquier dogma rígido.
+
+3. ENTRENAMIENTO Y PROGRESIÓN:
+   - El motor de la ganancia y mantenimiento muscular es la SOBRECARGA PROGRESIVA (aumentar peso, repeticiones o series a lo largo del tiempo) entrenando cerca del fallo muscular (RIR 1-3).
+   - Analiza los datos reales de entrenamientos, ejercicios, series y frecuencia cardíaca (Polar H10) cuando estén disponibles en el contexto.
+
+4. TONO Y FORMATO:
+   - Tono cercano, profesional, motivador, empático y directo.
+   - En español.
+   - Formato optimizado para Telegram (párrafos claros, emojis sutiles, sin encabezados markdown pesados como '# Título').
+   - Basa siempre tus respuestas en los datos reales del usuario que se te proporcionan en el JSON.
 """
 
 
 async def get_advice(user_prompt: str = "Analiza mi progreso reciente y dame una recomendación concreta.", context_days: int = 7) -> str:
     """
-    Genera una respuesta de IA manteniendo memoria de la conversación pasada.
+    Genera una respuesta de IA manteniendo memoria de la conversación pasada y contexto real de salud.
     """
     if not settings.groq_api_key or settings.groq_api_key.startswith("dummy"):
         logger.error("GROQ_API_KEY no válida en .env")
@@ -50,7 +65,7 @@ async def get_advice(user_prompt: str = "Analiza mi progreso reciente y dame una
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "system",
-                "content": f"Datos numéricos de salud actualizados del usuario (últimos {context_days} días):\n```json\n{context_json}\n```",
+                "content": f"Datos numéricos y objetivos reales del usuario (últimos {context_days} días):\n```json\n{context_json}\n```",
             },
         ]
 
@@ -60,13 +75,14 @@ async def get_advice(user_prompt: str = "Analiza mi progreso reciente y dame una
         # Añadir la nueva pregunta del usuario
         messages.append({"role": "user", "content": user_prompt})
 
-        # 4. Enviar a Groq
+        # 4. Enviar a Groq con el modelo configurado
+        model_name = settings.groq_model or "llama-3.3-70b-versatile"
         client = AsyncGroq(api_key=settings.groq_api_key)
 
         response = await client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            max_tokens=500,
-            temperature=0.7,
+            model=model_name,
+            max_tokens=650,
+            temperature=0.6,
             messages=messages,
         )
 
@@ -76,12 +92,12 @@ async def get_advice(user_prompt: str = "Analiza mi progreso reciente y dame una
         await db.add_chat_message("user", user_prompt)
         await db.add_chat_message("assistant", advice_text)
 
-        logger.info("Respuesta de IA generada y guardada en el historial correctamente.")
+        logger.info("Respuesta de IA generada con modelo %s y guardada en historial.", model_name)
         return advice_text
 
     except Exception as exc:
         logger.error("Error al obtener respuesta de Groq: %s", exc, exc_info=True)
         return (
-            f"⚠️ Error al conectar con Groq: {type(exc).__name__} - {exc}\n"
+            f"⚠️ Error al conectar con el servicio de IA: {type(exc).__name__} - {exc}\n"
             "Verifica la consola para ver el detalle del error."
         )

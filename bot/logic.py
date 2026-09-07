@@ -1,5 +1,5 @@
-﻿"""
-logic.py — Lógica de negocio: TDEE, déficit, proteína, racha, progresión y comparaciones.
+"""
+logic.py — Lógica de negocio: TDEE, déficit, proteína, racha, volumen muscular, récords y sugerencias.
 Todas las funciones son async y acceden a la BD a través de db.py.
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ from bot.config import settings
 
 logger = logging.getLogger(__name__)
 
-PROTEIN_RATIO = 2.0  # g por kg de peso corporal
+PROTEIN_RATIO = 1.7  # g por kg de peso corporal (rango óptimo basado en evidencia 1.6-1.8)
 WEIGHT_CHANGE_THRESHOLD = 1.0  # kg de diferencia para recalcular targets
 
 
@@ -167,11 +167,10 @@ async def get_protein_streak() -> dict[str, Any]:
     el objetivo de proteína diario.
     """
     targets = await db.get_targets()
-    prot_target = (targets or {}).get("protein_target_g") or 160.0
-    all_nutrition = await db.get_all_daily_nutrition(limit=None)
+    prot_target = (targets or {}).get("protein_target_g") or 135.0
+    all_nutrition = await db.get_all_daily_nutrition(limit=365)
 
     today_str = _today()
-    # Mapear fecha -> protein_g
     prot_by_date = {
         row["date"]: (row.get("protein_g") or 0.0)
         for row in all_nutrition
@@ -181,11 +180,9 @@ async def get_protein_streak() -> dict[str, Any]:
     today_prot = prot_by_date.get(today_str, 0.0)
     today_met = today_prot >= prot_target
 
-    # Calcular racha actual hacia atrás
     current_streak = 0
     start_date = datetime.now(ZoneInfo("Europe/Madrid")).date()
 
-    # Si hoy ya se cumplió, empezamos a contar desde hoy; si no, desde ayer
     if today_met:
         check_date = start_date
     else:
@@ -200,7 +197,6 @@ async def get_protein_streak() -> dict[str, Any]:
         else:
             break
 
-    # Récord histórico de racha
     sorted_dates = sorted(prot_by_date.keys())
     max_streak = 0
     temp_streak = 0
@@ -223,19 +219,18 @@ async def get_protein_streak() -> dict[str, Any]:
 
     max_streak = max(max_streak, current_streak)
 
-    # Mensaje motivacional
     if current_streak == 0:
-        motivation = "🌱 ¡Hoy es el momento perfecto para iniciar tu racha! La proteína construye y protege tu músculo."
+        motivation = "🌱 ¡Hoy es el momento perfecto para iniciar tu racha! La proteína construye y protege tu masa muscular."
     elif current_streak == 1:
-        motivation = "🔥 ¡Primer día completado! El hábito se construye día a día."
+        motivation = "🔥 ¡Primer día completado! El hábito se consolida día a día."
     elif current_streak < 4:
-        motivation = "⚡ ¡Gran comienzo! Mantén la consistencia y la masa muscular estará a salvo."
+        motivation = "⚡ ¡Gran comienzo! Mantén la consistencia y tu fuerza estará a salvo."
     elif current_streak < 7:
-        motivation = "🚀 ¡Ritmo imparable! Tu constancia con la proteína está dando resultados."
+        motivation = "🚀 ¡Ritmo imparable! Tu constancia con la nutrición da resultados directos."
     elif current_streak < 14:
-        motivation = "🏆 ¡Más de una semana perfecta! Disciplina de acero protegiendo tu masa muscular."
+        motivation = "🏆 ¡Más de una semana perfecta! Disciplina de acero protegiendo tu masa magra."
     else:
-        motivation = "👑 ¡Nivel Leyenda! Tu disciplina con la nutrición es impecable."
+        motivation = "👑 ¡Nivel Leyenda! Tu disciplina nutricional es ejemplar."
 
     return {
         "current_streak": current_streak,
@@ -255,18 +250,13 @@ async def get_protein_streak() -> dict[str, Any]:
 
 async def get_weekly_summary(days: int = 7) -> dict[str, Any]:
     """
-    Retorna un diccionario con:
-    - media de peso de la semana
-    - adherencia a proteína (% de días que se cumplió el objetivo)
-    - adherencia calórica
-    - número de sesiones de entrenamiento
-    - lista de nombres de entrenos
+    Retorna un resumen semanal completo de nutrición, peso y entrenos.
     """
     end = _today()
     start = _n_days_ago(days - 1)
     targets = await db.get_targets()
 
-    prot_target = (targets or {}).get("protein_target_g") or 160.0
+    prot_target = (targets or {}).get("protein_target_g") or 135.0
     cal_target = (targets or {}).get("calorie_target") or settings.default_calorie_target
 
     nutrition_rows = await db.get_nutrition_range(start, end)
@@ -322,63 +312,221 @@ async def get_weekly_summary(days: int = 7) -> dict[str, Any]:
     }
 
 
-async def get_season_summary(month: str | None = None) -> dict[str, Any]:
-    """Calcula la temporada mensual con XP, récords y ejercicio estrella."""
-    start, end, month_key = _month_bounds(month)
-    workouts = await db.get_workouts_range(start, end)
-    nutrition = await db.get_nutrition_range(start, end)
-    current_sets = await db.get_exercise_sets_range(start, end)
-    all_sets = await db.get_all_exercise_sets()
-    targets = await db.get_targets()
-    protein_target = (targets or {}).get("protein_target_g") or 160.0
+# ─────────────────────────────────────────────────────────────────────────────
+# Volumen Muscular Semanal (/volumen)
+# ─────────────────────────────────────────────────────────────────────────────
 
-    protein_days = sum(
-        1 for row in nutrition
-        if row.get("protein_g") is not None and row["protein_g"] >= protein_target
-    )
-    total_volume = round(sum(
-        (row.get("weight_kg") or 0.0) * (row.get("reps") or 0)
-        for row in current_sets
-    ), 1)
 
-    current_max: dict[str, float] = {}
-    previous_max: dict[str, float] = {}
-    volume_by_exercise: dict[str, float] = {}
-    for row in all_sets:
-        name = row.get("exercise_name")
-        weight = row.get("weight_kg")
-        if not name or weight is None:
-            continue
-        if row["date"] < start:
-            previous_max[name.casefold()] = max(previous_max.get(name.casefold(), 0.0), weight)
-        elif row["date"] <= end:
-            key = name.casefold()
-            current_max[key] = max(current_max.get(key, 0.0), weight)
-            volume_by_exercise[name] = volume_by_exercise.get(name, 0.0) + weight * (row.get("reps") or 0)
+async def get_weekly_muscle_volume(days: int = 7) -> dict[str, Any]:
+    """Calcula las series efectivas semanales por grupo muscular comparadas con referencias científicas."""
+    from bot.muscle_groups import MUSCLE_GROUP_ORDER, MUSCLE_GROUP_EMOJIS, get_volume_status, aggregate_muscle_fatigue
 
-    personal_records = [
-        name for name, weight in current_max.items()
-        if name in previous_max and weight > previous_max[name]
-    ]
-    star = max(volume_by_exercise, key=volume_by_exercise.get) if volume_by_exercise else None
-    xp = (
-        len(workouts) * 100
-        + protein_days * 25
-        + len(personal_records) * 100
-        + int(total_volume / 1000)
-    )
+    end = _today()
+    start = _n_days_ago(days - 1)
+
+    all_sets = await db.get_exercise_sets_range(start, end)
+    fatigue = aggregate_muscle_fatigue(all_sets, end)
+
+    groups_summary = []
+    total_sets = 0
+    total_volume_kg = 0.0
+
+    for muscle in MUSCLE_GROUP_ORDER:
+        data = fatigue.get(muscle, {"sets": 0, "volumen_kg": 0.0, "reps": 0})
+        s_count = data["sets"]
+        v_kg = data["volumen_kg"]
+        total_sets += s_count
+        total_volume_kg += v_kg
+
+        status_emoji, status_txt = get_volume_status(s_count)
+        groups_summary.append({
+            "muscle": muscle,
+            "emoji": MUSCLE_GROUP_EMOJIS.get(muscle, "🏋️‍♂️"),
+            "sets": s_count,
+            "volume_kg": round(v_kg, 1),
+            "status_emoji": status_emoji,
+            "status_text": status_txt,
+        })
 
     return {
-        "month": month_key,
-        "num_workouts": len(workouts),
-        "total_volume_kg": total_volume,
-        "protein_days": protein_days,
-        "personal_records": len(personal_records),
-        "personal_record_names": personal_records,
-        "star_exercise": star,
-        "xp": xp,
-        "level": xp // 250 + 1,
+        "period_start": start,
+        "period_end": end,
+        "total_sets": total_sets,
+        "total_volume_kg": round(total_volume_kg, 1),
+        "groups": groups_summary,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Detección y Consulta de Récords Personales (PRs / 1RM)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def detect_workout_prs(
+    workout_id: str,
+    exercises: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """
+    Detecta si alguna serie del entrenamiento actual bate un récord histórico (e1RM).
+    """
+    from bot.muscle_groups import estimate_1rm
+
+    all_sets = await db.get_all_exercise_sets()
+    prev_prs: dict[str, dict[str, Any]] = {}
+
+    for s in all_sets:
+        if s.get("workout_id") == workout_id:
+            continue
+        name = (s.get("exercise_name") or "").strip().lower()
+        if not name:
+            continue
+        w = s.get("weight_kg") or 0.0
+        r = s.get("reps") or 0
+        e1rm = estimate_1rm(w, r)
+        if e1rm > 0:
+            if name not in prev_prs or e1rm > prev_prs[name]["e1rm"]:
+                prev_prs[name] = {"e1rm": e1rm, "weight_kg": w, "reps": r, "date": s.get("date")}
+
+    detected_prs: list[dict[str, Any]] = []
+
+    for ex in exercises:
+        ex_name = (ex.get("name") or "").strip()
+        if not ex_name:
+            continue
+        name_key = ex_name.lower()
+        best_set_e1rm = 0.0
+        best_set_data = None
+
+        for s in ex.get("sets", []):
+            w = s.get("weight_kg") or 0.0
+            r = s.get("reps") or 0
+            cur_e1rm = estimate_1rm(w, r)
+            if cur_e1rm > best_set_e1rm:
+                best_set_e1rm = cur_e1rm
+                best_set_data = {"weight_kg": w, "reps": r, "e1rm": cur_e1rm}
+
+        if best_set_e1rm > 0 and best_set_data:
+            prev = prev_prs.get(name_key)
+            if prev:
+                diff = round(best_set_e1rm - prev["e1rm"], 1)
+                if diff >= 0.5:
+                    detected_prs.append({
+                        "exercise_name": ex_name,
+                        "is_pr": True,
+                        "new_1rm": best_set_e1rm,
+                        "prev_1rm": prev["e1rm"],
+                        "diff": diff,
+                        "best_set": f"{best_set_data['weight_kg']:.1f} kg × {best_set_data['reps']} reps",
+                        "prev_best_set": f"{prev['weight_kg']:.1f} kg × {prev['reps']} reps",
+                    })
+            else:
+                detected_prs.append({
+                    "exercise_name": ex_name,
+                    "is_pr": True,
+                    "is_first_time": True,
+                    "new_1rm": best_set_e1rm,
+                    "best_set": f"{best_set_data['weight_kg']:.1f} kg × {best_set_data['reps']} reps",
+                })
+
+    return detected_prs
+
+
+async def get_all_personal_records() -> list[dict[str, Any]]:
+    """Devuelve las mejores marcas históricas ordenadas por grupo muscular y 1RM."""
+    from bot.muscle_groups import estimate_1rm, get_muscle_group
+
+    all_sets = await db.get_all_exercise_sets()
+    prs: dict[str, dict[str, Any]] = {}
+
+    for s in all_sets:
+        name = (s.get("exercise_name") or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        w = s.get("weight_kg") or 0.0
+        r = s.get("reps") or 0
+        e1rm = estimate_1rm(w, r)
+        if e1rm <= 0:
+            continue
+
+        if key not in prs or e1rm > prs[key]["e1rm"]:
+            prs[key] = {
+                "exercise_name": name,
+                "muscle_group": get_muscle_group(name),
+                "e1rm": e1rm,
+                "best_weight": w,
+                "best_reps": r,
+                "date": s.get("date"),
+            }
+
+    return sorted(prs.values(), key=lambda x: (x["muscle_group"], -x["e1rm"]))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sugerencias Inteligentes de Comidas (/quecomo)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def get_meal_suggestions(meal_type: str = "cena") -> str:
+    """Genera 3 sugerencias de comidas prácticas adaptadas a los macros restantes de hoy."""
+    from groq import AsyncGroq
+    from bot.ai_advice import SYSTEM_PROMPT
+
+    today = await get_today_summary()
+    cal_rem = today["calories_remaining"]
+    prot_rem = today["protein_remaining"]
+
+    if cal_rem <= 100 and prot_rem <= 5:
+        return (
+            "🎯 <b>¡Objetivos de hoy ya cumplidos!</b>\n\n"
+            f"Has alcanzado tus calorías ({today['calories_consumed']:.0f} kcal) y proteína ({today['protein_consumed']:.0f} g).\n"
+            "Si tienes hambre o antojo, te recomiendo una infusión relajante (manzanilla, rooibos), agua fría con limón o gelatinas 0%."
+        )
+
+    prompt = f"""\
+El usuario te pide 3 opciones prácticas de {meal_type} basadas en sus macros restantes de hoy.
+
+DATOS NUTRICIONALES RESTANTES HOY:
+- Calorías restantes: {cal_rem:.0f} kcal
+- Proteína restante: {prot_rem:.0f} g
+- Carbos consumidos hoy: {today['carbs_consumed']:.0f} g
+- Grasas consumidas hoy: {today['fat_consumed']:.0f} g
+
+INSTRUCCIONES:
+1. Proporciona exactamente 3 opciones de {meal_type} deliciosas, sencillas y rápidas de preparar (menos de 10-15 min) usando ingredientes comunes (huevos, pechuga de pollo, lomo, atún, queso fresco batido, yogur griego, verduras, patata/arroz microondas, frutos secos, etc.).
+2. Para cada opción incluye:
+   - Nombre apetitoso
+   - Ingredientes y cantidades aproximadas
+   - Estimación de Kcal y Proteína
+3. Adapta las porciones para que sumen aproximadamente los macros restantes.
+4. Tono directo, enérgico y profesional en español, listo para Telegram (con emojis discretos y formato claro).
+"""
+
+    if not settings.groq_api_key or settings.groq_api_key.startswith("dummy"):
+        return (
+            "💡 <b>Sugerencia básica (sin IA configurada):</b>\n\n"
+            f"Te faltan <b>{prot_rem:.0f} g de proteína</b> y <b>{cal_rem:.0f} kcal</b>.\n"
+            "• Opción 1: Tortilla de 2 huevos + 3 claras con lata de atún al natural (~35g prot, 280 kcal).\n"
+            "• Opción 2: 200g de pechuga de pollo a la plancha con ensalada verde (~44g prot, 250 kcal).\n"
+            "• Opción 3: 250g de yogur griego o queso fresco batido 0% con frutos secos (~25g prot, 220 kcal)."
+        )
+
+    try:
+        model_name = settings.groq_model or "llama-3.3-70b-versatile"
+        client = AsyncGroq(api_key=settings.groq_api_key)
+        response = await client.chat.completions.create(
+            model=model_name,
+            max_tokens=650,
+            temperature=0.6,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return response.choices[0].message.content
+    except Exception as exc:
+        logger.error("Error generando sugerencias de comidas: %s", exc)
+        return f"⚠️ Error al conectar con la IA: {exc}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -476,112 +624,18 @@ async def build_ai_context(days: int = 7) -> dict[str, Any]:
     weight_rows = await db.get_weight_range(start, end)
     weekly = await get_weekly_summary(days)
     streak = await get_protein_streak()
+    volume = await get_weekly_muscle_volume(days)
 
     return {
         "today": _today(),
         "targets": targets,
         "protein_streak": streak,
         "weekly_summary": weekly,
+        "muscle_volume_last_7_days": volume,
         "nutrition_last_7_days": nutrition_rows,
         "workouts_last_7_days": [
             {k: v for k, v in w.items() if k != "raw_json"}
             for w in workout_rows
         ],
         "weight_last_7_days": weight_rows,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Análisis de Fatiga y Recuperación Muscular (openGym integration)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-async def get_muscle_fatigue_map(days: int = 7) -> dict[str, Any]:
-    """
-    Analiza la fatiga muscular basada en los entrenamientos de los últimos N días.
-    Devuelve un mapa de grupos musculares con su estado de recuperación.
-    """
-    from bot.muscle_groups import (
-        aggregate_muscle_fatigue, recovery_status, MUSCLE_GROUP_ORDER, MUSCLE_GROUP_EMOJIS
-    )
-    
-    end = _today()
-    start = _n_days_ago(days - 1)
-    
-    # Obtener todas las series del periodo
-    all_sets = await db.get_exercise_sets_range(start, end)
-    if not all_sets:
-        return {
-            "has_data": False,
-            "message": "No hay entrenamientos registrados en los últimos 7 días."
-        }
-    
-    # Agregar fatiga por grupo muscular
-    fatigue_map = aggregate_muscle_fatigue(all_sets, end)
-    
-    # Enriquecer con estado de recuperación
-    result = {
-        "has_data": True,
-        "period": f"{start} → {end}",
-        "muscles": {},
-        "summary": []
-    }
-    
-    for muscle in MUSCLE_GROUP_ORDER:
-        data = fatigue_map[muscle]
-        if data["sets"] == 0:
-            continue
-        
-        last_workout = data["último_entreno"]
-        hours_since = (
-            0 if not last_workout else 
-            round((datetime.fromisoformat(end) - datetime.fromisoformat(last_workout)).total_seconds() / 3600)
-        )
-        emoji, status = recovery_status(hours_since)
-        
-        result["muscles"][muscle] = {
-            "emoji": MUSCLE_GROUP_EMOJIS.get(muscle, "❓"),
-            "sets": data["sets"],
-            "volumen_kg": round(data["volumen_kg"], 1),
-            "reps": data["reps"],
-            "último_entreno": last_workout,
-            "horas_desde": hours_since,
-            "status_emoji": emoji,
-            "status": status,
-        }
-        result["summary"].append(f"{MUSCLE_GROUP_EMOJIS.get(muscle)} {muscle}: {status} ({hours_since}h)")
-    
-    return result
-
-
-async def get_exercise_library_insights(user_exercises: list[str]) -> dict[str, Any]:
-    """
-    Analiza los ejercicios del usuario y devuelve insights sobre qué grupos musculares trabaja.
-    Útil para recomendar ejercicios complementarios o detectar desbalances.
-    """
-    from bot.muscle_groups import get_muscle_groups_for_exercise, MUSCLE_GROUP_EMOJIS
-    
-    muscle_count: dict[str, int] = {}
-    exercise_detail = {}
-    
-    for exercise_name in user_exercises:
-        muscles = get_muscle_groups_for_exercise(exercise_name)
-        exercise_detail[exercise_name] = muscles
-        for muscle in muscles:
-            muscle_count[muscle] = muscle_count.get(muscle, 0) + 1
-    
-    # Detectar desbalances
-    most_worked = max(muscle_count, key=muscle_count.get) if muscle_count else None
-    least_worked = min(muscle_count, key=muscle_count.get) if muscle_count else None
-    
-    return {
-        "ejercicios_analizados": len(user_exercises),
-        "grupos_musculares_únicos": len(muscle_count),
-        "frecuencia_por_grupo": {
-            f"{MUSCLE_GROUP_EMOJIS.get(m, '?')} {m}": count
-            for m, count in sorted(muscle_count.items(), key=lambda x: -x[1])
-        },
-        "más_trabajado": f"{MUSCLE_GROUP_EMOJIS.get(most_worked, '?')} {most_worked}" if most_worked else None,
-        "menos_trabajado": f"{MUSCLE_GROUP_EMOJIS.get(least_worked, '?')} {least_worked}" if least_worked else None,
-        "detalle": exercise_detail,
     }

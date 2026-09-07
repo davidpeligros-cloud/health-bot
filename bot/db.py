@@ -1,4 +1,4 @@
-﻿"""
+"""
 db.py — Acceso asíncrono a SQLite con aiosqlite.
 Incluye inicialización del esquema y todas las funciones CRUD.
 """

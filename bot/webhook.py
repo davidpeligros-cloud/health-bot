@@ -1,4 +1,4 @@
-﻿"""
+"""
 webhook.py — Endpoints FastAPI para recibir datos desde Atajos (Shortcuts) de iOS.
 Robusto ante variaciones de mayúsculas, formatos planos o anidados, fechas en español,
 frecuencia cardíaca (Polar H10) y rutinas de Hevy.

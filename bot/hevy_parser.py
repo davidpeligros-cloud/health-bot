@@ -1,4 +1,4 @@
-﻿"""
+"""
 hevy_parser.py — Parser para exportaciones de texto de Hevy y cálculo de volumen.
 Soporta formatos en español e inglés, peso corporal, incrementos (+kg) y RPE.
 """
@@ -356,9 +356,10 @@ def parse_hevy_text(text: str) -> Optional[dict[str, Any]]:
 
 def format_hevy_summary(
     parsed: dict[str, Any],
-    progression: Optional[list[dict[str, Any]]] = None
+    progression: Optional[list[dict[str, Any]]] = None,
+    prs: Optional[list[dict[str, Any]]] = None
 ) -> str:
-    """Genera un mensaje formateado en HTML para Telegram con los detalles del entreno y progresión."""
+    """Genera un mensaje formateado en HTML para Telegram con los detalles del entreno, progresión y PRs."""
     lines = [
         f"🏋️‍♂️ <b>{parsed['workout_name']}</b> — {parsed['date']}",
         f"📊 Total series: <b>{parsed['total_sets']}</b> | Volumen: <b>{parsed['total_volume_kg']:,.0f} kg</b>".replace(",", "."),
@@ -367,6 +368,15 @@ def format_hevy_summary(
         lines.append(f"⏱ Duración: <b>{parsed['duration_min']:.0f} min</b>")
 
     lines.append("")
+
+    # Destacar Récords Personales si los hay
+    if prs:
+        real_prs = [p for p in prs if not p.get("is_first_time")]
+        if real_prs:
+            lines.append("🏆 <b>¡NUEVOS RÉCORDS PERSONALES BATIDOS!</b>")
+            for pr in real_prs:
+                lines.append(f"  🔥 <b>{pr['exercise_name']}</b>: {pr['best_set']} (+{pr['diff']:.1f} kg en 1RM est: <b>{pr['new_1rm']:.1f} kg</b>)")
+            lines.append("")
 
     prog_map = {p["exercise_name"]: p for p in (progression or [])}
 

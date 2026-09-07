@@ -77,13 +77,33 @@ async def main() -> None:
 
     async with telegram_app:
         await telegram_app.initialize()
-        await telegram_app.start()
+        # Registrar comandos en el menú nativo de Telegram
+        try:
+            from telegram import BotCommand
+            commands = [
+                BotCommand("hoy", "Resumen de hoy (macros, racha, peso)"),
+                BotCommand("semana", "Informe semanal y adherencia"),
+                BotCommand("racha", "Racha de proteína y récord"),
+                BotCommand("volumen", "Series semanales por grupo muscular"),
+                BotCommand("records", "Récords personales y 1RM estimado"),
+                BotCommand("grafica", "Gráfico visual de peso y macros"),
+                BotCommand("quecomo", "Ideas de comida según macros restantes"),
+                BotCommand("entreno", "Último entreno y FC Polar H10"),
+                BotCommand("objetivo", "Ver o editar metas calóricas/proteína"),
+                BotCommand("consejo", "Asesoramiento del entrenador IA"),
+                BotCommand("recuerdame", "Programar recordatorio (ej. 10:00 Creatina)"),
+                BotCommand("ayuda", "Guía y manual completo del bot"),
+            ]
+            await telegram_app.bot.set_my_commands(commands)
+            logger.info("Menú de comandos de Telegram configurado.")
+        except Exception as exc:
+            logger.warning("No se pudieron registrar los comandos en Telegram: %s", exc)
 
         # Notificación de inicio
         try:
             await telegram_app.bot.send_message(
                 chat_id=settings.telegram_chat_id,
-                text="🚀 <b>Bot iniciado correctamente.</b>\nEscribe /ping para verificar.",
+                text="🚀 <b>Bot iniciado correctamente.</b>\nEscribe /ayuda para ver los comandos.",
                 parse_mode="HTML",
             )
         except Exception as exc:

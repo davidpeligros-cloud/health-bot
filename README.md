@@ -1,26 +1,27 @@
-﻿# 🏋️‍♂️ Health & Fitness Telegram Bot + Webhook
+# 🏋️‍♂️ Health & Fitness Telegram Bot + Webhook
 
-Bot personal de Telegram y servidor FastAPI para seguimiento de recomposición corporal (pérdida de grasa y mantenimiento/ganancia de masa muscular) con datos automáticos de Apple Health (Yazio, Hevy, Polar H10) mediante Atajos de iOS.
+Bot personal de Telegram y servidor FastAPI para seguimiento de recomposición corporal (pérdida de grasa y ganancia de masa muscular) con datos automáticos de Apple Health (Yazio, Hevy, Polar H10) mediante Atajos de iOS y un entrenador con IA basado en evidencia científica.
 
 ---
 
-## 🚀 Novedades y Características
+## 🚀 Características y Novedades
 
-1. **🥩 Racha de Proteína (`/racha`)**:
-   - Muestra tu racha actual de días consecutivos cumpliendo tu objetivo diario de proteína.
-   - Registra tu récord histórico y te muestra el avance del día y mensajes motivacionales.
-2. **🏋️‍♂️ Parser de Entrenamientos Hevy con Progresión**:
-   - Pega directamente el texto compartido desde Hevy en el chat de Telegram o envíalo por webhook.
-   - Extrae automáticamente ejercicios, series, pesos, repeticiones y RPE.
-   - Reconoce series de peso corporal y conserva el lastre (`+kg`) por separado.
-   - Calcula el volumen total de la sesión y la **progresión automática** (incremento de kilos y volumen) comparando cada ejercicio con su sesión anterior.
-3. **❤️ Frecuencia Cardíaca Polar H10**:
-   - Registra FC media y FC máxima de las sesiones de entrenamiento.
-   - Se muestra en `/entreno` y en las alertas inmediatas.
-4. **📱 Webhook tolerante a fallos para Atajos de iOS**:
-   - Admite payloads planos o anidados.
-   - Resuelve el campo `type` con inferencia automática (sensible y no sensible a mayúsculas: `workout`, `nutrition_daily`, `body_weight`).
-   - Normaliza automáticamente fechas en español (ej. *"24 ago 2026, 18:30"*) y números decimales con comas (*"78,5"*).
+1. **🏆 Récords Personales y 1RM Estimado (`/records` / `/prs`)**:
+   - Calcula tu 1RM estimado (fórmula de Epley) para cada ejercicio.
+   - Detecta automáticamente cuando rompes un récord personal al subir un entreno y te avisa con una felicitación especial.
+2. **📊 Volumen Semanal por Grupo Muscular (`/volumen`)**:
+   - Clasifica tus series por grupo muscular (Pecho, Espalda, Cuádriceps, Isquios/Glúteo, Hombros, Brazos, Core).
+   - Compara tus series efectivas con las referencias científicas de hipertrofia (*Schoenfeld et al.*, 10-20 series semanales).
+3. **🍳 Sugerencias Inteligentes de Comida (`/quecomo`, `/cena`, `/comida`)**:
+   - Analiza en tiempo real las calorías y proteína que te faltan hoy y te propone 3 recetas rápidas, deliciosas y con ingredientes sencillos adaptadas exactamente a tus números.
+4. **📈 Gráficos Visuales de Progreso (`/grafica`, `/progreso`)**:
+   - Envía a Telegram una imagen con la curva de peso con media móvil de 7 días y barras de calorías y proteína vs objetivos.
+5. **🥩 Racha de Proteína (`/racha`)**:
+   - Contador de días consecutivos cumpliendo tu meta de proteína y récord histórico.
+6. **🏋️‍♂️ Parser de Hevy con Progresión**:
+   - Pega tu rutina directamente en Telegram: detecta ejercicios, series, pesos, repeticiones, RPE y calcula la progresión contra tu sesión anterior.
+7. **❤️ Pulsaciones Polar H10**:
+   - Registra frecuencia cardíaca media y máxima en cada entrenamiento.
 
 ---
 
@@ -28,20 +29,20 @@ Bot personal de Telegram y servidor FastAPI para seguimiento de recomposición c
 
 | Comando | Descripción |
 |---|---|
-| `/racha` | Muestra tu racha actual y récord de días consecutivos cumpliendo la proteína |
+| `/racha` | Muestra tu racha actual y récord histórico de proteína |
+| `/records` o `/prs` | Lista tus récords personales y 1RM estimado por ejercicio |
+| `/volumen` | Series semanales por grupo muscular y estado de hipertrofia |
+| `/quecomo` o `/cena` | 3 opciones de comida/cena ajustadas a tus macros restantes |
+| `/grafica` | Gráfico de evolución de peso y adherencia nutricional |
 | `/hoy` | Resumen del día (calorías, proteína, carbos, grasas, peso, racha) |
 | `/semana` | Informe semanal de adherencia, peso medio, tendencia y entrenos |
-| `/temporada` | Resumen mensual con nivel, XP, récords y ejercicio estrella |
-| `/entreno` | Último entreno registrado con FC Polar H10, detalle de series y comparativa |
+| `/entreno` | Último entreno con FC Polar H10, series y comparativa |
 | `/hevy` | Ayuda e importación manual de rutinas de Hevy |
-| `/objetivo` | Ver o ajustar objetivos (`/objetivo cal 1800 prot 160`) |
-| `/consejo` | Solicitar análisis o recomendación a la IA |
+| `/objetivo` | Ver o ajustar objetivos (`/objetivo cal 1800 prot 135`) |
+| `/consejo` | Consejo personalizado del entrenador IA |
 | `/recuerdame` | Programar recordatorios (`/recuerdame 10:00 Tomar creatina`) |
 | `/olvidar` | Limpiar la memoria del chat con la IA |
-| `/backup` | Crear una copia manual de la base de datos |
-| `/musculos` | Análisis de grupos musculares trabajados (frecuencia y desbalances) |
-| `/fatiga` | Mapa visual de fatiga/recuperación muscular (últimos 7 días, o especificar: `/fatiga 14`) |
-| *Chat libre* | Escribe cualquier duda o pega un entreno de Hevy directamente |
+| *Chat libre* | Habla con el entrenador IA o pega un entreno de Hevy directamente |
 
 ---
 
@@ -55,12 +56,12 @@ Bot personal de Telegram y servidor FastAPI para seguimiento de recomposición c
 ```json
 {
   "type": "nutrition_daily",
-  "calories": 1850,
-  "protein_g": 165,
+  "calories": 1800,
+  "protein_g": 135,
   "carbs_g": 180,
   "fat_g": 55,
-  "weight_kg": 78.5,
-  "date": "2026-08-24"
+  "weight_kg": 81.5,
+  "date": "2026-09-07"
 }
 ```
 
@@ -74,19 +75,9 @@ Bot personal de Telegram y servidor FastAPI para seguimiento de recomposición c
   "active_energy_kcal": 450,
   "avg_hr_bpm": 142,
   "max_hr_bpm": 174,
-  "date": "2026-08-24"
+  "date": "2026-09-07"
 }
 ```
-
-También acepta `workout.exercises` con series estructuradas, o `workout.raw_text`
-con el texto exportado de Hevy.
-
-La base de datos se copia automáticamente cada día a `data/backups` a las 03:30
-(hora de Madrid) y se conservan las últimas 14 copias. Puedes crear una copia
-manual con `/backup`. El horario, directorio y retención se pueden cambiar con
-`BACKUP_TIME`, `BACKUP_DIR` y `BACKUP_RETENTION_DAYS` en `.env`.
-
-El bot envía automáticamente la temporada el último día de cada mes a las 21:30.
 
 ---
 
@@ -98,11 +89,4 @@ El bot envía automáticamente la temporada el último día de cada mes a las 21
 
 # Iniciar bot y webhook
 python -m bot.main
-```
-
-## ✅ Comprobaciones locales
-
-```bash
-.venv\Scripts\python.exe -m unittest discover -s tests -v
-.venv\Scripts\python.exe -m compileall -q bot
 ```

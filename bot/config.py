@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # ── IA (Groq) ─────────────────────────────────────────────────────────────
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "openai/gpt-oss-120b"
 
     # ── Objetivos ─────────────────────────────────────────────────────────────
     tdee_estimate: float = 2200.0

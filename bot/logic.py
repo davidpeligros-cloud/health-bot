@@ -519,17 +519,35 @@ INSTRUCCIONES:
         )
 
     try:
-        model_name = settings.groq_model or "llama-3.3-70b-versatile"
+        candidate_models = [settings.groq_model, "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+        unique_models = []
+        for m in candidate_models:
+            if m and m not in unique_models:
+                unique_models.append(m)
+
         client = AsyncGroq(api_key=settings.groq_api_key)
-        response = await client.chat.completions.create(
-            model=model_name,
-            max_tokens=650,
-            temperature=0.6,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-        )
+        response = None
+        last_err = None
+
+        for m_candidate in unique_models:
+            try:
+                response = await client.chat.completions.create(
+                    model=m_candidate,
+                    max_tokens=650,
+                    temperature=0.6,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                )
+                break
+            except Exception as e:
+                last_err = e
+                continue
+
+        if response is None:
+            raise last_err or RuntimeError("No hay modelo de Groq disponible.")
+
         return response.choices[0].message.content
     except Exception as exc:
         logger.error("Error generando sugerencias de comidas: %s", exc)

@@ -75,16 +75,35 @@ async def get_advice(user_prompt: str = "Analiza mi progreso reciente y dame una
         # Añadir la nueva pregunta del usuario
         messages.append({"role": "user", "content": user_prompt})
 
-        # 4. Enviar a Groq con el modelo configurado
-        model_name = settings.groq_model or "llama-3.3-70b-versatile"
-        client = AsyncGroq(api_key=settings.groq_api_key)
+        # 4. Enviar a Groq con modelos candidatos y fallback automático
+        candidate_models = [settings.groq_model, "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+        # Filtrar duplicados y vacíos
+        unique_models = []
+        for m in candidate_models:
+            if m and m not in unique_models:
+                unique_models.append(m)
 
-        response = await client.chat.completions.create(
-            model=model_name,
-            max_tokens=650,
-            temperature=0.6,
-            messages=messages,
-        )
+        client = AsyncGroq(api_key=settings.groq_api_key)
+        response = None
+        last_error = None
+        used_model = None
+
+        for model_candidate in unique_models:
+            try:
+                response = await client.chat.completions.create(
+                    model=model_candidate,
+                    max_tokens=700,
+                    temperature=0.6,
+                    messages=messages,
+                )
+                used_model = model_candidate
+                break
+            except Exception as e:
+                logger.warning("Fallo con modelo %s: %s. Probando siguiente...", model_candidate, e)
+                last_error = e
+
+        if response is None:
+            raise last_error or RuntimeError("Ningún modelo de Groq disponible.")
 
         advice_text = response.choices[0].message.content
 
@@ -92,7 +111,7 @@ async def get_advice(user_prompt: str = "Analiza mi progreso reciente y dame una
         await db.add_chat_message("user", user_prompt)
         await db.add_chat_message("assistant", advice_text)
 
-        logger.info("Respuesta de IA generada con modelo %s y guardada en historial.", model_name)
+        logger.info("Respuesta de IA generada con modelo %s y guardada en historial.", used_model)
         return advice_text
 
     except Exception as exc:

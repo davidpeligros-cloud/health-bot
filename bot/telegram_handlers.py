@@ -533,6 +533,71 @@ async def _process_and_reply_hevy(update: Update, text: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Helper para envío seguro de respuestas de IA (evita fallos de HTML y divide si > 4000 chars)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def _reply_ai_safe(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    wait_message_id: int | None,
+    advice: str,
+    title: str = "🧠 <b>Consejo personalizado:</b>\n\n",
+) -> None:
+    """Envía la respuesta de la IA de forma segura, dividiéndola en trozos si excede el límite de Telegram."""
+    full_text = f"{title}{advice}"
+    
+    # Telegram max limit is 4096 chars. Split by paragraph if longer.
+    max_chunk = 3900
+    chunks = []
+    
+    if len(full_text) <= max_chunk:
+        chunks = [full_text]
+    else:
+        current_chunk = ""
+        for line in full_text.splitlines(keepends=True):
+            if len(current_chunk) + len(line) > max_chunk:
+                chunks.append(current_chunk)
+                current_chunk = line
+            else:
+                current_chunk += line
+        if current_chunk:
+            chunks.append(current_chunk)
+
+    for idx, chunk in enumerate(chunks):
+        if idx == 0 and wait_message_id is not None:
+            # Intentar editar el mensaje de espera
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=wait_message_id,
+                    text=chunk,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                # Si falla por entidades HTML inválidas en el texto de la IA, enviar como texto plano
+                clean_chunk = chunk.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=wait_message_id,
+                    text=clean_chunk,
+                )
+        else:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode="HTML",
+                )
+            except Exception:
+                clean_chunk = chunk.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=clean_chunk,
+                )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # /consejo
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -544,9 +609,15 @@ async def cmd_consejo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         else "Analiza mi progreso reciente y dame una recomendación concreta."
     )
 
-    await update.message.reply_text("🤔 Analizando tus datos y nuestra conversación… un momento.")
+    wait_msg = await update.message.reply_text("🤔 Analizando tus datos y nuestra conversación… un momento.")
     advice = await get_advice(user_prompt=user_prompt, context_days=7)
-    await update.message.reply_html(f"🧠 <b>Consejo personalizado:</b>\n\n{advice}")
+    await _reply_ai_safe(
+        context=context,
+        chat_id=update.effective_chat.id,
+        wait_message_id=wait_msg.message_id,
+        advice=advice,
+        title="🧠 <b>Consejo personalizado:</b>\n\n",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -615,11 +686,12 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         advice = await get_advice(user_prompt=user_message, context_days=7)
-        await context.bot.edit_message_text(
+        await _reply_ai_safe(
+            context=context,
             chat_id=update.effective_chat.id,
-            message_id=wait_msg.message_id,
-            text=f"🧠 <b>Consejo personalizado:</b>\n\n{advice}",
-            parse_mode="HTML",
+            wait_message_id=wait_msg.message_id,
+            advice=advice,
+            title="🧠 <b>Consejo personalizado:</b>\n\n",
         )
     except Exception as exc:
         logger.error("Error en chat libre con IA: %s", exc)

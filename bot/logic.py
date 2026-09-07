@@ -197,15 +197,22 @@ async def get_protein_streak() -> dict[str, Any]:
         else:
             break
 
-    sorted_dates = sorted(prot_by_date.keys())
+    # Récord histórico de racha
+    valid_dates = []
+    for d_str in prot_by_date.keys():
+        try:
+            cur_d = date.fromisoformat(d_str)
+            valid_dates.append((cur_d, d_str))
+        except (ValueError, TypeError):
+            continue
+
+    valid_dates.sort(key=lambda x: x[0])
     max_streak = 0
     temp_streak = 0
     prev_d: date | None = None
 
-    for d_str in sorted_dates:
+    for cur_d, d_str in valid_dates:
         p = prot_by_date[d_str]
-        cur_d = date.fromisoformat(d_str)
-
         if p >= prot_target:
             if prev_d and (cur_d - prev_d).days == 1:
                 temp_streak += 1

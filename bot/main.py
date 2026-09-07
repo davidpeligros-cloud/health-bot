@@ -77,6 +77,8 @@ async def main() -> None:
 
     async with telegram_app:
         await telegram_app.initialize()
+        await telegram_app.start()
+
         # Registrar comandos en el menú nativo de Telegram
         try:
             from telegram import BotCommand

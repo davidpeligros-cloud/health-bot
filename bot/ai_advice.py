@@ -58,8 +58,14 @@ async def get_advice(user_prompt: str = "Analiza mi progreso reciente y dame una
         context = await build_ai_context(days=context_days)
         context_json = json.dumps(context, ensure_ascii=False, indent=2)
 
-        # 2. Recuperar el historial de conversación guardado (últimos 8 mensajes)
-        history = await db.get_recent_chat_history(limit=8)
+        # 2. Recuperar el historial de conversación guardado (últimos 6 mensajes, recortando textos gigantes)
+        raw_history = await db.get_recent_chat_history(limit=6)
+        history = []
+        for msg in raw_history:
+            content = msg.get("content", "")
+            if len(content) > 800:
+                content = content[:800] + "… [recortado para brevedad]"
+            history.append({"role": msg["role"], "content": content})
 
         # 3. Ensamblar los mensajes para Groq
         messages = [
@@ -77,7 +83,7 @@ async def get_advice(user_prompt: str = "Analiza mi progreso reciente y dame una
         messages.append({"role": "user", "content": user_prompt})
 
         # 4. Enviar a Groq con modelos candidatos y fallback automático
-        candidate_models = [settings.groq_model, "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+        candidate_models = [settings.groq_model, "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b", "qwen/qwen3.6-27b"]
         # Filtrar duplicados y vacíos
         unique_models = []
         for m in candidate_models:
@@ -93,7 +99,7 @@ async def get_advice(user_prompt: str = "Analiza mi progreso reciente y dame una
             try:
                 response = await client.chat.completions.create(
                     model=model_candidate,
-                    max_tokens=2048,
+                    max_tokens=1000,
                     temperature=0.6,
                     messages=messages,
                 )
@@ -117,6 +123,12 @@ async def get_advice(user_prompt: str = "Analiza mi progreso reciente y dame una
 
     except Exception as exc:
         logger.error("Error al obtener respuesta de Groq: %s", exc, exc_info=True)
+        err_msg = str(exc)
+        if "429" in err_msg or "rate_limit" in err_msg.lower() or "413" in err_msg:
+            return (
+                "⏳ <i>El servicio de IA de Groq está ocupado en este momento (límite de peticiones por minuto alcanzado). "
+                "Por favor, vuelve a escribir tu pregunta en unos 30-60 segundos.</i>"
+            )
         return (
             f"⚠️ Error al conectar con el servicio de IA: {type(exc).__name__} - {exc}\n"
             "Verifica la consola para ver el detalle del error."

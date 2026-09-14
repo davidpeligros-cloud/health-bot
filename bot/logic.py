@@ -639,7 +639,7 @@ async def compare_exercise_progression(
 
 
 async def build_ai_context(days: int = 7) -> dict[str, Any]:
-    """Construye el contexto numérico para el módulo de IA."""
+    """Construye el contexto numérico para el módulo de IA de forma concisa y completa."""
     end = _today()
     start = _n_days_ago(days - 1)
 
@@ -651,16 +651,49 @@ async def build_ai_context(days: int = 7) -> dict[str, Any]:
     streak = await get_protein_streak()
     volume = await get_weekly_muscle_volume(days)
 
+    workouts_detail = []
+    for w in workout_rows:
+        w_clean = {
+            "date": w.get("date"),
+            "name": w.get("name"),
+            "duration_min": w.get("duration_min"),
+            "active_kcal": w.get("active_energy_kcal"),
+            "avg_hr": w.get("avg_hr_bpm"),
+        }
+        w_exs = await db.get_workout_exercises(w["id"])
+        if w_exs:
+            grouped: dict[str, list[str]] = {}
+            for s in w_exs:
+                e_name = s.get("exercise_name") or "Ejercicio"
+                if e_name not in grouped:
+                    grouped[e_name] = []
+                w_str = f"{s['weight_kg']:g}kg" if s.get("weight_kg") is not None else "0kg"
+                grouped[e_name].append(f"{w_str}x{s.get('reps', 0)}")
+            w_clean["exercises"] = [
+                f"{name} ({len(sets)} series: {', '.join(sets)})"
+                for name, sets in grouped.items()
+            ]
+        workouts_detail.append(w_clean)
+
     return {
         "today": _today(),
         "targets": targets,
         "protein_streak": streak,
         "weekly_summary": weekly,
         "muscle_volume_last_7_days": volume,
-        "nutrition_last_7_days": nutrition_rows,
-        "workouts_last_7_days": [
-            {k: v for k, v in w.items() if k != "raw_json"}
-            for w in workout_rows
+        "nutrition_last_7_days": [
+            {
+                "date": n.get("date"),
+                "calories": n.get("calories"),
+                "protein_g": n.get("protein_g"),
+                "carbs_g": n.get("carbs_g"),
+                "fat_g": n.get("fat_g"),
+            }
+            for n in nutrition_rows
         ],
-        "weight_last_7_days": weight_rows,
+        "workouts_last_7_days": workouts_detail,
+        "weight_last_7_days": [
+            {"date": wt.get("date"), "weight_kg": wt.get("weight_kg")}
+            for wt in weight_rows if wt.get("weight_kg") is not None
+        ],
     }

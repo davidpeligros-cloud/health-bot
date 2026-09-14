@@ -323,7 +323,22 @@ def parse_hevy_text(text: str) -> Optional[dict[str, Any]]:
             )
         else:
             clean_name = re.sub(r"^\d+[\.\-\)]\s*", "", line).strip()
-            clean_name = re.sub(r"^[•\-\*🏋️‍♂️💪🔥]\s*", "", clean_name).strip()
+            clean_name = re.sub(r"^[•\-\*🏋️‍♂️💪🔥📝]\s*", "", clean_name).strip()
+
+            # Filtrar encabezados, metadatos y líneas no relevantes de Hevy
+            ignored_patterns = [
+                r"^(?:series?|sets?)$",
+                r"^(?:peso\s*y\s*repeticiones|peso\s*y\s*reps|weight\s*(?:&|and)\s*reps)$",
+                r"^(?:distancia\s*y\s*tiempo|distance\s*(?:&|and)\s*time)$",
+                r"^(?:duración|duracion|duration|volumen|volume)$",
+                r"^(?:rpe|notas?|descanso|rest|tiempo|distancia)$",
+                r"^\d+[\.,]?\d*\s*(?:kg|kilos|lbs|km|m|min|s|seg|h|hrs)$",
+                r"^(?:\d+\s*[hH])?\s*\d+\s*(?:min|m|s|seg)$",
+                r"^\d+$",
+                r"^[\d\.,\s\-\:]+$",
+            ]
+            if any(re.match(p, clean_name, re.IGNORECASE) for p in ignored_patterns):
+                continue
 
             if clean_name and len(clean_name) > 2 and not clean_name.lower().startswith("nota"):
                 if current_exercise and not current_exercise["sets"]:

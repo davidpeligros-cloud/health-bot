@@ -528,8 +528,17 @@ async def _process_and_reply_hevy(update: Update, text: str) -> None:
     summary_html = format_hevy_summary(parsed, progression, prs=prs)
     await update.message.reply_html(summary_html)
 
-    # Registrar en memoria para que el asistente IA lo sepa
-    await db.add_chat_message("user", f"[Entrenamiento Hevy registrado]: {parsed['workout_name']} con {parsed['total_sets']} series y {parsed['total_volume_kg']} kg de volumen.")
+    # Registrar en memoria para que el asistente IA lo sepa en detalle
+    ex_details = []
+    for ex in parsed["exercises"]:
+        best = ex.get("best_set")
+        best_txt = f" (máx {best['weight_kg']:g}kg x {best['reps']})" if best else ""
+        ex_details.append(f"{ex['name']} ({len(ex['sets'])} series{best_txt})")
+    ex_summary_str = "; ".join(ex_details)
+    await db.add_chat_message(
+        "user",
+        f"[Entrenamiento registrado: {parsed['workout_name']} ({parsed['date']}) — {parsed['total_sets']} series, {parsed['total_volume_kg']:,.0f} kg volumen total. Ejercicios: {ex_summary_str}]"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

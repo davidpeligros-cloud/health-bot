@@ -91,6 +91,7 @@ async def main() -> None:
                 BotCommand("grafica", "Gráfico visual de peso y macros"),
                 BotCommand("quecomo", "Ideas de comida según macros restantes"),
                 BotCommand("entreno", "Último entreno y FC Polar H10"),
+                BotCommand("exportar", "Descargar backup CSV y base de datos"),
                 BotCommand("objetivo", "Ver o editar metas calóricas/proteína"),
                 BotCommand("consejo", "Asesoramiento del entrenador IA"),
                 BotCommand("recuerdame", "Programar recordatorio (ej. 10:00 Creatina)"),

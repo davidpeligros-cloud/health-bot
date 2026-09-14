@@ -263,6 +263,37 @@ async def upsert_daily_nutrition(
         await db.commit()
 
 
+async def add_to_daily_nutrition(
+    date_str: str,
+    calories: float = 0.0,
+    protein_g: float = 0.0,
+    carbs_g: float = 0.0,
+    fat_g: float = 0.0,
+    source: str = "quick_nlp",
+) -> dict[str, float]:
+    """Suma calorías y macronutrientes al registro del día especificado y devuelve el total acumulado."""
+    existing = await get_daily_nutrition(date_str)
+    new_cal = round(((existing.get("calories") or 0.0) if existing else 0.0) + calories, 1)
+    new_prot = round(((existing.get("protein_g") or 0.0) if existing else 0.0) + protein_g, 1)
+    new_carbs = round(((existing.get("carbs_g") or 0.0) if existing else 0.0) + carbs_g, 1)
+    new_fat = round(((existing.get("fat_g") or 0.0) if existing else 0.0) + fat_g, 1)
+
+    await upsert_daily_nutrition(
+        date_str=date_str,
+        calories=new_cal,
+        protein_g=new_prot,
+        carbs_g=new_carbs,
+        fat_g=new_fat,
+        source=source,
+    )
+    return {
+        "calories": new_cal,
+        "protein_g": new_prot,
+        "carbs_g": new_carbs,
+        "fat_g": new_fat,
+    }
+
+
 async def get_daily_nutrition(date_str: str) -> dict[str, Any] | None:
     async with aiosqlite.connect(settings.database_path) as db:
         db.row_factory = aiosqlite.Row

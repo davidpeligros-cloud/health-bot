@@ -14,8 +14,11 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 
 from bot import db, logic
 from bot.ai_advice import get_advice
+from bot.audio_transcriber import transcribe_audio
+from bot.backup_service import generate_csv_export, get_sqlite_backup_bytes
 from bot.charts import generate_progress_chart
 from bot.hevy_parser import is_hevy_workout_text, parse_hevy_text, format_hevy_summary
+from bot.nlp_parser import parse_weight_intent, parse_explicit_macros_intent, is_food_description_intent, estimate_food_macros_ai
 from bot.scheduler_jobs import schedule_custom_reminder
 
 logger = logging.getLogger(__name__)
@@ -51,9 +54,9 @@ def _fmt_diff(value: float, unit: str = "") -> str:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Mensaje de bienvenida y guía completa del bot."""
     msg = (
-        "👋 <b>¡Bienvenido a tu Entrenador y Nutricionista Personal!</b>\n\n"
+        "👋 <b>¡Bienvenido a tu Entrenador y Nutricionista Personal de Élite!</b>\n\n"
         "Este bot analiza automáticamente tus datos de salud (Apple Health, Yazio, Hevy, Polar H10) "
-        "para ayudarte en tu recomposición corporal (perder grasa y maximizar masa muscular).\n\n"
+        "para optimizar tu recomposición corporal basada 100% en evidencia científica.\n\n"
         "📋 <b>Comandos principales:</b>\n"
         "• /hoy — Resumen de calorías, proteína y racha de hoy\n"
         "• /racha — Tu racha de días cumpliendo proteína\n"
@@ -63,9 +66,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /quecomo — 3 sugerencias de comidas adaptadas a tus macros\n"
         "• /semana — Informe semanal de consistencia y peso\n"
         "• /entreno — Último entreno registrado con FC Polar H10\n"
+        "• /exportar o /backup — Descargar historial en CSV y backup SQLite\n"
         "• /objetivo — Ver o editar tus metas (/objetivo cal 1800 prot 135)\n"
         "• /consejo — Pide consejo o escribe cualquier duda al chat\n\n"
-        "🏋️‍♂️ <i>Truco: Puedes pegar directamente un entrenamiento de Hevy en este chat para analizarlo al instante con PRs y progresión.</i>"
+        "🎙️ <b>Audios de voz:</b> ¡Envíame una nota de voz hablando y te responderé al instante!\n"
+        "📝 <b>Registro rápido:</b> Puedes escribir <i>'Hoy peso 79.5 kg'</i> o <i>'Apunta 30g de proteína'</i> directamente.\n"
+        "🏋️‍♂️ <b>Hevy:</b> Pega directamente el texto de tu rutina para analizar PRs y progresión."
     )
     await update.message.reply_html(msg)
 
@@ -672,25 +678,189 @@ async def cmd_olvidar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Chat libre con IA & Detección de Hevy
+# /exportar y /backup (Exportación CSV y copia de seguridad de Base de Datos)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cmd_exportar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Genera y envía una exportación completa en CSV y la copia de seguridad SQLite."""
+    wait_msg = await update.message.reply_text("📦 Generando archivos de exportación… un momento.")
+
+    try:
+        # 1. Enviar CSV para Excel / Google Sheets
+        csv_bytes, csv_filename = await generate_csv_export()
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=io.BytesIO(csv_bytes),
+            filename=csv_filename,
+            caption="📊 <b>Historial completo exportado en CSV</b>\n(Abre directamente en Excel o Google Sheets).",
+            parse_mode="HTML",
+        )
+
+        # 2. Enviar SQLite DB Backup
+        db_bytes, db_filename = get_sqlite_backup_bytes()
+        await context.bot.send_document(
+            chat_id=update.effective_chat.id,
+            document=io.BytesIO(db_bytes),
+            filename=db_filename,
+            caption="💾 <b>Copia de seguridad completa (.db)</b>\nGuarda este archivo para restaurar tu base de datos.",
+            parse_mode="HTML",
+        )
+
+        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=wait_msg.message_id)
+    except Exception as exc:
+        logger.error("Error en exportación/backup: %s", exc, exc_info=True)
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=wait_msg.message_id,
+            text=f"⚠️ Error al generar el backup: {exc}",
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Procesamiento de Notas de Voz (Whisper) & Texto Unificado (NLP + IA)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Detecta automáticamente si el usuario pegó una rutina de Hevy.
-    Si no, procesa la consulta con la IA.
+    Descarga el audio de Telegram, lo transcribe con Groq Whisper y lo procesa.
     """
-    user_message = update.message.text
-    if not user_message:
+    voice = update.message.voice or update.message.audio
+    if not voice:
         return
 
+    wait_msg = await update.message.reply_text("🎙️ Transcribiendo audio con Whisper… un momento.")
+
+    try:
+        file = await context.bot.get_file(voice.file_id)
+        audio_bytearray = await file.download_as_bytearray()
+        audio_bytes = bytes(audio_bytearray)
+
+        transcription = await transcribe_audio(audio_bytes, filename="voice.ogg")
+        if not transcription:
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=wait_msg.message_id,
+                text="⚠️ No pude entender el audio o hubo un problema al transcribir.",
+            )
+            return
+
+        # Eliminar el mensaje de espera de transcripción
+        await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=wait_msg.message_id)
+
+        # Mostrar lo que entendió y procesarlo
+        await update.message.reply_html(f"🗣️ <i>\"{transcription}\"</i>")
+        await _process_text_message(update, context, transcription)
+
+    except Exception as exc:
+        logger.error("Error procesando nota de voz: %s", exc, exc_info=True)
+        await context.bot.edit_message_text(
+            chat_id=update.effective_chat.id,
+            message_id=wait_msg.message_id,
+            text="❌ Hubo un error al procesar tu nota de voz.",
+        )
+
+
+async def _process_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_message: str) -> None:
+    """
+    Pipeline unificado de procesamiento:
+    1. Hevy Workout text import
+    2. NLP Registro de peso
+    3. NLP Registro de macros explícitos (kcal / g proteína)
+    4. NLP Estimación de alimentos descritos con IA
+    5. Asistente y Entrenador Personal IA
+    """
     # 1. Comprobar si es un texto de entrenamiento de Hevy
     if is_hevy_workout_text(user_message):
         await _process_and_reply_hevy(update, user_message)
         return
 
-    # 2. Conversación natural con la IA
+    # 2. Comprobar si es un registro de peso (ej. 'Hoy peso 79.5 kg')
+    weight = parse_weight_intent(user_message)
+    if weight is not None:
+        today_str = datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()
+        await db.upsert_body_weight(today_str, weight)
+        recalculated = await logic.recalculate_targets_if_needed()
+        trend = await logic.get_weight_trend(7)
+        targets = await db.get_targets()
+        prot_target = (targets or {}).get("protein_target_g") or (weight * 2.0)
+
+        trend_txt = f" (media 7d: {trend:.1f} kg)" if trend else ""
+        recalc_txt = f"\n🎯 Proteína objetivo recalculada: <b>{prot_target:.0f} g</b>" if recalculated else ""
+        await update.message.reply_html(
+            f"⚖️ <b>Peso registrado:</b> <b>{weight:.1f} kg</b>{trend_txt}{recalc_txt}\n\n"
+            f"<i>Registrado para hoy ({today_str}).</i>"
+        )
+        await db.add_chat_message("user", f"[Registro de peso]: {weight:.1f} kg.")
+        return
+
+    # 3. Comprobar si son macros explícitos (ej. 'Apunta 300 kcal y 35g prote')
+    macros = parse_explicit_macros_intent(user_message)
+    if macros is not None:
+        today_str = datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()
+        updated = await db.add_to_daily_nutrition(
+            date_str=today_str,
+            calories=macros["calories"],
+            protein_g=macros["protein_g"],
+            carbs_g=macros["carbs_g"],
+            fat_g=macros["fat_g"],
+            source="quick_nlp",
+        )
+        summary = await logic.get_today_summary()
+        prot_rem = summary["protein_remaining"]
+        cal_rem = summary["calories_remaining"]
+
+        added_parts = []
+        if macros["calories"]: added_parts.append(f"🔥 +{macros['calories']:.0f} kcal")
+        if macros["protein_g"]: added_parts.append(f"🥩 +{macros['protein_g']:.0f}g prote")
+        if macros["carbs_g"]: added_parts.append(f"🍞 +{macros['carbs_g']:.0f}g carb")
+        if macros["fat_g"]: added_parts.append(f"🫒 +{macros['fat_g']:.0f}g gras")
+
+        await update.message.reply_html(
+            f"✅ <b>Nutrición añadida:</b>\n"
+            f"{' | '.join(added_parts)}\n\n"
+            f"📊 <b>Total acumulado hoy:</b> {updated['calories']:.0f} kcal | {updated['protein_g']:.0f}g proteína\n"
+            f"🎯 <i>Restante: {max(0, cal_rem):.0f} kcal | {max(0, prot_rem):.0f}g proteína</i>"
+        )
+        await db.add_chat_message("user", f"[Nutrición añadida]: +{macros['calories']:.0f} kcal, +{macros['protein_g']:.0f}g prote.")
+        return
+
+    # 4. Comprobar si describe alimentos para estimación nutricional con IA
+    if is_food_description_intent(user_message):
+        wait_food = await update.message.reply_text("🍳 Estimando información nutricional del plato con IA…")
+        estimated = await estimate_food_macros_ai(user_message)
+        if estimated and (estimated["calories"] > 0 or estimated["protein_g"] > 0):
+            today_str = datetime.now(ZoneInfo("Europe/Madrid")).date().isoformat()
+            updated = await db.add_to_daily_nutrition(
+                date_str=today_str,
+                calories=estimated["calories"],
+                protein_g=estimated["protein_g"],
+                carbs_g=estimated["carbs_g"],
+                fat_g=estimated["fat_g"],
+                source="quick_nlp_ai",
+            )
+            summary = await logic.get_today_summary()
+            notes_txt = f"\n💡 <i>{estimated['notes']}</i>" if estimated.get("notes") else ""
+
+            await context.bot.edit_message_text(
+                chat_id=update.effective_chat.id,
+                message_id=wait_food.message_id,
+                text=(
+                    f"🍽️ <b>{estimated['food_name']}</b> registrada:\n"
+                    f"🔥 <b>{estimated['calories']:.0f} kcal</b> | 🥩 <b>{estimated['protein_g']:.0f}g prote</b> | "
+                    f"🍞 <b>{estimated['carbs_g']:.0f}g carb</b> | 🫒 <b>{estimated['fat_g']:.0f}g gras</b>{notes_txt}\n\n"
+                    f"📊 <b>Total acumulado hoy:</b> {updated['calories']:.0f} kcal | {updated['protein_g']:.0f}g proteína\n"
+                    f"🎯 <i>Restante: {max(0, summary['calories_remaining']):.0f} kcal | {max(0, summary['protein_remaining']):.0f}g proteína</i>"
+                ),
+                parse_mode="HTML",
+            )
+            await db.add_chat_message("user", f"[Comida registrada: {estimated['food_name']} ({estimated['calories']:.0f} kcal, {estimated['protein_g']:.0f}g prote)]")
+            return
+        else:
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=wait_food.message_id)
+
+    # 5. Conversación natural con la IA (Entrenador / Nutricionista)
     wait_msg = await update.message.reply_text("🤔 Analizando tus datos y nuestra conversación… un momento.")
 
     try:
@@ -709,6 +879,14 @@ async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             message_id=wait_msg.message_id,
             text="❌ Hubo un error procesando tu mensaje con la IA.",
         )
+
+
+async def handle_free_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Maneja mensajes de texto libre dirigiéndolos al pipeline unificado."""
+    user_message = update.message.text
+    if not user_message:
+        return
+    await _process_text_message(update, context, user_message)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -736,11 +914,17 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("objetivo", cmd_objetivo))
     application.add_handler(CommandHandler("entreno", cmd_entreno))
     application.add_handler(CommandHandler("hevy", cmd_hevy))
+    application.add_handler(CommandHandler(["exportar", "backup", "csv"], cmd_exportar))
     application.add_handler(CommandHandler("consejo", cmd_consejo))
     application.add_handler(CommandHandler("recuerdame", cmd_recuerdame))
     application.add_handler(CommandHandler("olvidar", cmd_olvidar))
 
+    # Mensajes de voz y audio (Groq Whisper)
+    application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
+
+    # Mensajes de texto libre (NLP + Hevy + Asistente IA)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_message))
+    
     application.add_error_handler(error_handler)
 
-    logger.info("Handlers de Telegram registrados (con /start, /racha, /volumen, /records, /quecomo, /grafica y Hevy PRs).")
+    logger.info("Handlers de Telegram registrados (con /start, /racha, /volumen, /records, /quecomo, /grafica, /exportar, Whisper y NLP).")
